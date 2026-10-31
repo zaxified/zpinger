@@ -52,8 +52,9 @@ embedded into the binary). Nothing beyond Zig's standard library and
 
 ## Build and run
 
-Needs Zig 0.17.0. Inside this repository the library comes from the checkout
-(`build.zig.zon` depends on `../..`):
+Needs Zig 0.17.0 (`.zigversion`). The zig-fping library is a package
+dependency pinned to a release tag in `build.zig.zon`; build against a local
+checkout with `zig build --fork=../zig-fping`:
 
 ```sh
 zig build                     # ReleaseSafe by default
@@ -374,5 +375,5 @@ sh smoke.sh        # end to end: loopback targets, API, ETag, health, Host guard
 ./package.sh       # the .deb packages; smoke-tests the packaged binary first
 ```
 
-Inside the repository `scripts/test.sh` runs the first two, the smoke test in
-an isolated network namespace; `scripts/release.sh` runs `package.sh`.
+`smoke.sh` runs itself in an isolated network namespace through
+`scripts/netns-run`; `package.sh` resolves Zig through `scripts/zig-env.sh`.

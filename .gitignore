@@ -1,2 +1,6 @@
+.zig-cache/
+zig-out/
+zig-pkg/
+.zig-toolchain/
 history.json
 history.json.bad

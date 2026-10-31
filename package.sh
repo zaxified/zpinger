@@ -7,15 +7,13 @@
 #   ./package.sh [--skip-tests] [OUTDIR]     (default OUTDIR: zig-out/deb)
 #
 # Before packing, the native package's own (stripped) binary runs the smoke
-# test. scripts/release.sh calls this and attaches the packages to the
-# GitHub release. Needs dpkg-deb. Also ships the about page for a demo hub
+# test. Needs dpkg-deb. Also ships the about page for a demo hub
 # (zig build about) in /usr/share/fping-watch/about/.
 set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO=$HERE/../..
 # zig-env.sh finds the repository from its own path ($0).
-ZIG=$(sh -c '. "$0" && printf %s "$ZIG"' "$REPO/scripts/zig-env.sh")
+ZIG=$(sh -c '. "$0" && printf %s "$ZIG"' "$HERE/scripts/zig-env.sh")
 
 TESTS=1
 [ "${1:-}" = --skip-tests ] && { TESTS=; shift; }
@@ -48,7 +46,7 @@ for pair in x86_64-linux:amd64 aarch64-linux:arm64; do
     # The about page for a demo hub: /usr/share/fping-watch/about/.
     "$ZIG" build about --prefix "$stage/usr/share/fping-watch"
     install -D -m 0644 README.md "$stage/usr/share/doc/fping-watch/README.md"
-    install -D -m 0644 "$REPO/LICENSE" "$stage/usr/share/doc/fping-watch/copyright"
+    install -D -m 0644 "$HERE/LICENSE" "$stage/usr/share/doc/fping-watch/copyright"
     install -d "$stage/DEBIAN"
     for script in postinst prerm postrm; do
         install -m 0755 "deploy/debian/$script" "$stage/DEBIAN/$script"

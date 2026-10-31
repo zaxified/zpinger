@@ -11,7 +11,7 @@ set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 BIN=$(realpath "${1:-$HERE/zig-out/bin/fping-watch}")
-NETNS_RUN="$HERE/../../scripts/netns-run"
+NETNS_RUN="$HERE/scripts/netns-run"
 if [ -z "${ZFPING_NETNS:-}" ] && [ -x "$NETNS_RUN" ]; then
     exec "$NETNS_RUN" sh "$0" "$BIN"
 fi

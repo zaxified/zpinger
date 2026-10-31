@@ -5,10 +5,11 @@
     .fingerprint = 0x35ee980ba83c73f5,
     .paths = .{ "build.zig", "build.zig.zon", "src", "tools", "deploy", "targets.json", "smoke.sh", "package.sh", "README.md", "doc" },
     .dependencies = .{
-        // The library from this repository's checkout. A copy of this
-        // directory taken on its own would pin a release instead:
-        //   .url = "git+https://github.com/zaxified/zig-fping#v0.2.1",
-        //   .hash = "...",            (zig fetch --save <url> fills it in)
-        .zig_fping = .{ .path = "../.." },
+        // `?ref=` is only a note for the reader: Zig fetches the commit in
+        // the fragment, and the hash holds the pin.
+        .zig_fping = .{
+            .url = "git+https://github.com/zaxified/zig-fping?ref=v0.2.1#431fe37c09e116f2a12700516c455b6e3de40f74",
+            .hash = "zig_fping-0.2.1-cRXn2UdJBwC_lHd8NLE0ipXwa1BAp4g6Giai7vLiJwM4",
+        },
     },
 }
