@@ -608,7 +608,7 @@ function renderTrace(panel, t) {
   head.append(again);
 
   const table = el("table", "hops");
-  const cols = [["#", "Hop: the TTL of the probe"], ["Host", "Who answered at this hop, address and reverse-DNS name (several: a load-balanced hop)"], ["Last 60 s", "One bar per round, the height is the round-trip time; red: no answer"], ["Loss", "Probes without an answer. Loss at a hop that later hops do not show is usually the router limiting its answers, not loss on the path"], ["Sent", "Probes sent to this hop"], ["Last", "Round-trip time of the last answer, ms"], ["Avg", "Average round-trip time, ms"], ["Best", "Best round-trip time, ms"], ["Worst", "Worst round-trip time, ms"], ["Jitter", "Mean change between consecutive round-trip times, ms"]];
+  const cols = [["#", "Hop: the TTL of the probe"], ["Host", "Who answered at this hop, address and reverse-DNS name (several: a load-balanced hop)"], ["Last 60 s", "One bar per round, the height is the round-trip time; red: no answer"], ["Loss", "Probes without an answer. Grey: loss the later hops do not show, the router limiting its answers rather than loss on the path"], ["Sent", "Probes sent to this hop"], ["Last", "Round-trip time of the last answer, ms"], ["Avg", "Average round-trip time, ms"], ["Best", "Best round-trip time, ms"], ["Worst", "Worst round-trip time, ms"], ["Jitter", "Mean change between consecutive round-trip times, ms"]];
   const hr = el("tr");
   for (const [name, hint] of cols) {
     const th = el("th", null, name);
@@ -616,7 +616,8 @@ function renderTrace(panel, t) {
     hr.append(th);
   }
   table.append(hr);
-  for (const h of d ? d.hops : []) {
+  const hops = d ? d.hops : [];
+  hops.forEach((h, idx) => {
     const row = el("tr");
     const host = el("td", "hop-host");
     if (h.hosts.length)
@@ -634,12 +635,21 @@ function renderTrace(panel, t) {
     else host.append(el("span", "muted", "no answer"));
     const spark = el("td", "spark");
     spark.append(renderSpark(h.spark));
-    const loss = el("td", h.loss >= 10 ? "num bad" : "num", h.sent ? `${(h.loss / 10).toFixed(h.loss % 10 ? 1 : 0)} %` : "–");
+    // Loss that the hops after this one do not show is the router limiting
+    // its ICMP answers, not loss on the path (as mtr reads it): grey, not red.
+    const later = hops.slice(idx + 1).filter((x) => x.sent > 0);
+    const pathLoss = later.length ? Math.min(...later.map((x) => x.loss)) : h.loss;
+    const limited = h.loss >= 10 && pathLoss < h.loss;
+    const loss = el("td", limited ? "num limited" : h.loss >= 10 ? "num bad" : "num", h.sent ? `${(h.loss / 10).toFixed(h.loss % 10 ? 1 : 0)} %` : "–");
+    if (limited)
+      loss.title = `This router answers only some probes: it limits its ICMP answers. The hops after it lose ${(pathLoss / 10).toFixed(pathLoss % 10 ? 1 : 0)} %, so the path itself does not lose this much.`;
     if (h.code !== null) loss.title = `Destination Unreachable, code ${h.code}`;
-    row.append(el("td", "num", String(h.ttl)), host, spark, loss, el("td", "num", String(h.sent)));
+    const ttl = el("td", h.shared ? "num shared" : "num", String(h.ttl));
+    if (h.shared) ttl.title = "Shared with other live traces: their paths cross this router, and one probe a second measures it for all of them";
+    row.append(ttl, host, spark, loss, el("td", "num", String(h.sent)));
     for (const k of ["last", "avg", "best", "worst", "jitter"]) row.append(el("td", "num", usMs(h[k])));
     table.append(row);
-  }
+  });
   // The panel is rebuilt every second (and on every page render): keep the
   // horizontal scroll position the viewer chose on a narrow screen.
   const wrap = el("div", "hops-wrap");

@@ -6,6 +6,14 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
+- **Live traces share their common hops** (zig-libs `traceroute.MtrSet`, one
+  socket per address family): a router several traces cross gets one probe a
+  second, not one per trace, so its per-source ICMP limit no longer shows as
+  loss when more traces run; the hop number is dotted, JSON `shared`. Each
+  trace re-probes its whole path every 30 s.
+- **Loss a router's answer limit causes is grey:** loss at a hop that the
+  hops after it do not show is shown grey, with the path's own loss in the
+  tooltip; red stays for loss that carries on.
 - **Live traces bounded per viewer:** one trace per host (not per target),
   shared by every viewer; at most 2 per viewer (a client address, IPv6 by
   /64; behind a proxy on loopback the last `X-Forwarded-For` entry,

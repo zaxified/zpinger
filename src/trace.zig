@@ -12,8 +12,10 @@
 //!   (a client address, see `Viewer`);
 //! - a session stops when no viewer polled it for `idle_s` (or the last one
 //!   left), and `max_age_s` after it started, whatever the page does;
-//! - zig-libs `traceroute.Mtr` paces each round (probes `gap_ms` apart) and
-//!   never starts rounds closer than `interval_ms`.
+//! - every trace of one address family is a member of one zig-libs
+//!   `traceroute.MtrSet` (`Engine`): one socket, rounds at most once a
+//!   second, probes paced `gap_ms` apart, and a hop shared by several
+//!   traces probed once a round.
 //! Without CAP_NET_RAW it runs on an unprivileged ping socket, like the
 //! probing cycle.
 //!
@@ -22,7 +24,7 @@
 //! (`Tracer.names = false`, `--trace-names off`, turns it off).
 //!
 //! Locking: `Tracer.mutex` guards the session table; each `Session.mutex`
-//! guards that session's snapshot. A session's own thread owns its socket.
+//! guards that session's snapshot, which the engine of its family fills.
 
 const std = @import("std");
 const Io = std.Io;
@@ -51,11 +53,18 @@ const name_timeout_ms = 1000;
 /// How often the lookup task checks for new addresses.
 const name_poll_ms = 250;
 
-const mtr_options: traceroute.MtrOptions = .{
-    .max_hops = max_hops,
-    .interval_ms = 1000,
-    .timeout_ms = 1000,
-    .gap_ms = 20,
+/// All traces of one address family run as members of one `MtrSet`: a hop
+/// their paths share (the home gateway, the ISP's routers) gets one probe a
+/// round, however many traces cross it, so a router limiting its ICMP
+/// answers per source does not show false loss when several traces run.
+const set_options: traceroute.MtrSetOptions = .{
+    .mtr = .{
+        .max_hops = max_hops,
+        .interval_ms = 1000,
+        .timeout_ms = 1000,
+        // Paces the whole round, every member's probes together.
+        .gap_ms = 10,
+    },
 };
 
 pub const Error = error{ TraceDisabled, TooManyTraces, ViewerLimit, RateLimited };
@@ -91,17 +100,24 @@ pub const Tracer = struct {
     /// reads the same measurement.
     slots: [max_slots]?*Session = @splat(null),
     watches: [max_watches]?Watch = @splat(null),
+    /// The probing engines, IPv4 and IPv6.
+    engines: [2]Engine = .{ .{ .family = .v4 }, .{ .family = .v6 } },
+    /// Gives every session an identity the engines can check (a freed
+    /// session's address may come back for the next one).
+    serial: u64 = 0,
     /// Start times of the last `max_starts_per_min` sessions (a ring).
     starts: [max_starts_per_min]?i64 = @splat(null),
     start_i: usize = 0,
 
-    /// Stops every session and waits for their threads.
+    /// Stops every session and waits for their threads, then for the
+    /// engines (each stops after its round once no session is left).
     pub fn deinit(t: *Tracer) void {
         for (&t.slots) |*slot| if (slot.*) |s| {
             s.stop.store(true, .monotonic);
             t.release(s);
             slot.* = null;
         };
+        for (&t.engines) |*e| e.wait(t.io);
     }
 
     /// `viewer` watches the trace of `host`: joins the running session, or
@@ -137,7 +153,8 @@ pub const Tracer = struct {
 
         const s = try t.gpa.create(Session);
         errdefer t.gpa.destroy(s);
-        s.* = .{ .tracer = t, .host = try t.gpa.dupe(u8, host), .started = now, .last_poll = .init(now) };
+        t.serial += 1;
+        s.* = .{ .tracer = t, .serial = t.serial, .host = try t.gpa.dupe(u8, host), .started = now, .last_poll = .init(now) };
         errdefer t.gpa.free(s.host);
         s.future = try t.io.concurrent(Session.run, .{s});
         t.slots[slot] = s;
@@ -255,10 +272,146 @@ pub const Tracer = struct {
     }
 };
 
-const Reason = enum { running, idle, max_age, stopped, unresolved, no_socket, failed };
+const Reason = enum(u8) { running, idle, max_age, stopped, unresolved, no_socket, failed };
+
+/// How often a session checks whether it should stop.
+const session_poll_ms = 250;
+
+/// The probes of every trace of one address family: one `LiveMtrSet` on its
+/// own task, which runs while a session is registered. A session registers
+/// once it has resolved its host; between rounds the engine adds and removes
+/// set members to match, and after each round copies every member's
+/// statistics into its session.
+///
+/// Locking: `mutex` guards `regs`, `running` and `future`; the engine holds
+/// it while it copies into sessions (taking each `Session.mutex` inside it),
+/// never during a round. Only a session's own thread calls `register` and
+/// `unregister`, holding no other lock, so the order is always `mutex`, then
+/// a `Session.mutex`. A session unregisters before its thread ends, and
+/// `Tracer.release` frees it only after that: the engine never copies into
+/// a freed session.
+const Engine = struct {
+    family: enum { v4, v6 },
+    tracer: *Tracer = undefined,
+    mutex: Io.Mutex = .init,
+    regs: [max_slots]?Reg = @splat(null),
+    running: bool = false,
+    future: ?Io.Future(void) = null,
+
+    const Reg = struct { session: *Session, serial: u64, member: ?u8 = null };
+
+    fn register(e: *Engine, s: *Session) (error{TooManyTraces} || Io.ConcurrentError)!void {
+        const io = s.tracer.io;
+        e.mutex.lockUncancelable(io);
+        defer e.mutex.unlock(io);
+        const slot = for (&e.regs) |*r| {
+            if (r.* == null) break r;
+        } else return error.TooManyTraces;
+        slot.* = .{ .session = s, .serial = s.serial };
+        if (e.running) return;
+        e.tracer = s.tracer;
+        // The last engine task finished (it cleared `running` as its last
+        // step under `mutex`): reap it before starting the next.
+        if (e.future) |*f| f.await(io);
+        e.future = io.concurrent(run, .{e}) catch |err| {
+            e.future = null;
+            slot.* = null;
+            return err;
+        };
+        e.running = true;
+    }
+
+    fn unregister(e: *Engine, s: *Session) void {
+        const io = s.tracer.io;
+        e.mutex.lockUncancelable(io);
+        defer e.mutex.unlock(io);
+        for (&e.regs) |*r| if (r.*) |x| if (x.session == s and x.serial == s.serial) {
+            r.* = null;
+        };
+    }
+
+    /// Waits for the engine task, which stops once no session is
+    /// registered (`Tracer.deinit`, after every session was released).
+    fn wait(e: *Engine, io: Io) void {
+        e.mutex.lockUncancelable(io);
+        const f = e.future;
+        e.future = null;
+        e.mutex.unlock(io);
+        if (f) |fut| {
+            var x = fut;
+            x.await(io);
+        }
+    }
+
+    fn run(e: *Engine) void {
+        const io = e.tracer.io;
+        const live = e.tracer.gpa.create(traceroute.LiveMtrSet) catch return e.fail(.failed);
+        defer e.tracer.gpa.destroy(live);
+        live.* = traceroute.LiveMtrSet.open(e.tracer.gpa, switch (e.family) {
+            .v4 => .v4,
+            .v6 => .v6,
+        }, set_options) catch |err| {
+            log.info("cannot open the trace socket: {t}", .{err});
+            return e.fail(if (err == error.PermissionDenied) .no_socket else .failed);
+        };
+        defer live.close();
+        const unprivileged = live.lt.sock.kind == .dgram;
+        while (true) {
+            if (!e.sync(&live.set)) return;
+            live.round() catch |err| {
+                // An aborted round counts for nobody; the next one retries.
+                log.info("trace round failed: {t}", .{err});
+                io.sleep(.fromSeconds(1), .awake) catch return;
+                continue;
+            };
+            e.mutex.lockUncancelable(io);
+            defer e.mutex.unlock(io);
+            for (e.regs) |r| if (r) |x| if (x.member) |id| if (live.set.member(id)) |mb|
+                x.session.record(&mb.mtr, mb.sharedLastRound(), unprivileged);
+        }
+    }
+
+    /// Matches the set's members to the registered sessions. False when
+    /// none is left: the task then ends (`running` cleared under `mutex`).
+    fn sync(e: *Engine, set: *traceroute.MtrSet) bool {
+        const io = e.tracer.io;
+        e.mutex.lockUncancelable(io);
+        defer e.mutex.unlock(io);
+        var used: [traceroute.max_set_members]bool = @splat(false);
+        var any = false;
+        for (&e.regs) |*r| if (r.*) |*x| {
+            any = true;
+            if (x.member == null) x.member = set.add(x.session.address.?) catch |err| {
+                log.info("trace of {s}: {t}", .{ x.session.host, err });
+                x.session.failure.store(.failed, .release);
+                r.* = null;
+                continue;
+            };
+            used[x.member.?] = true;
+        };
+        for (used, 0..) |u, id| if (!u) set.remove(@intCast(id));
+        if (!any) e.running = false;
+        return any;
+    }
+
+    /// The socket cannot be opened: every registered session stops with
+    /// `reason`, and the task ends.
+    fn fail(e: *Engine, reason: Reason) void {
+        const io = e.tracer.io;
+        e.mutex.lockUncancelable(io);
+        defer e.mutex.unlock(io);
+        for (&e.regs) |*r| if (r.*) |x| {
+            x.session.failure.store(reason, .release);
+            r.* = null;
+        };
+        e.running = false;
+    }
+};
 
 const Hop = struct {
     stats: traceroute.MtrHop,
+    /// The last round's answer came from a probe another trace sent.
+    shared: bool = false,
     /// Round-trip times of the last rounds in µs, oldest first; null = lost.
     spark: [spark_len]?u32 = @splat(null),
     spark_n: u8 = 0,
@@ -290,12 +443,15 @@ const Name = struct {
 
 const Session = struct {
     tracer: *Tracer,
+    serial: u64,
     host: []u8,
     started: i64,
     last_poll: std.atomic.Value(i64),
     stop: std.atomic.Value(bool) = .init(false),
     finished: std.atomic.Value(bool) = .init(false),
     future: ?Io.Future(void) = null,
+    /// Set by the engine when it cannot probe for this session.
+    failure: std.atomic.Value(Reason) = .init(.running),
 
     /// The snapshot the page reads, under `mutex`.
     mutex: Io.Mutex = .init,
@@ -320,7 +476,6 @@ const Session = struct {
             log.info("trace of {s} failed: {t}", .{ s.host, err });
             break :blk switch (err) {
                 error.UnknownHostName => Reason.unresolved,
-                error.PermissionDenied => Reason.no_socket,
                 else => Reason.failed,
             };
         };
@@ -330,33 +485,34 @@ const Session = struct {
         s.finished.store(true, .release);
     }
 
+    /// Resolves the host, then watches the engine of its family probe it
+    /// until the session ends (the engine fills the snapshot).
     fn trace(s: *Session) !Reason {
         const io = s.tracer.io;
         const dest = (try resolve(io, s.host)).toIp();
-        // Heap: a LiveMtr must not move while it runs, and is large-ish.
-        const live = try s.tracer.gpa.create(traceroute.LiveMtr);
-        defer s.tracer.gpa.destroy(live);
-        live.* = try traceroute.LiveMtr.open(s.tracer.gpa, dest, mtr_options);
-        defer live.close();
         s.mutex.lockUncancelable(io);
         s.address = dest;
-        s.unprivileged = live.lt.sock.kind == .dgram;
         s.mutex.unlock(io);
-
+        const engine = &s.tracer.engines[if (dest == .v4) 0 else 1];
+        try engine.register(s);
+        defer engine.unregister(s);
         while (true) {
             if (s.stop.load(.monotonic)) return .stopped;
+            const failure = s.failure.load(.acquire);
+            if (failure != .running) return failure;
             const now = s.tracer.clock();
             if (now - s.last_poll.load(.monotonic) > idle_s) return .idle;
             if (now - s.started > max_age_s) return .max_age;
-            try live.round();
-            s.record(&live.mtr);
+            io.sleep(.fromMilliseconds(session_poll_ms), .awake) catch return .stopped;
         }
     }
 
-    fn record(s: *Session, m: *const traceroute.Mtr) void {
+    /// The engine's copy of this session's member after a round.
+    fn record(s: *Session, m: *const traceroute.Mtr, shared: []const bool, unprivileged: bool) void {
         const io = s.tracer.io;
         s.mutex.lockUncancelable(io);
         defer s.mutex.unlock(io);
+        s.unprivileged = unprivileged;
         const hops = m.hops();
         const last = m.lastRound();
         const n = @min(hops.len, max_hops);
@@ -364,6 +520,7 @@ const Session = struct {
             // A hop the engine reset (the path changed) starts its line over.
             if (i >= s.hop_n or hops[i].sent < s.hops[i].stats.sent) s.hops[i] = .{ .stats = hops[i] };
             s.hops[i].stats = hops[i];
+            s.hops[i].shared = i < shared.len and shared[i];
             s.hops[i].push(last[i].rtt_ns);
             if (hops[i].address) |a| s.noteAddress(a);
             for (hops[i].addressList()) |a| s.noteAddress(a);
@@ -483,6 +640,8 @@ const Session = struct {
             try writeUs(&j, st.jitterNs());
             try j.objectField("code");
             try j.write(st.unreachable_code);
+            try j.objectField("shared");
+            try j.write(h.shared);
             try j.objectField("spark");
             try j.write(h.spark[0..h.spark_n]);
             try j.endObject();
@@ -539,7 +698,7 @@ test "viewer: IPv6 by /64, IPv4 by address" {
 /// A session in the table that runs no thread (tests of the bookkeeping).
 fn idleSession(t: *Tracer, host: []const u8, now: i64) !*Session {
     const s = try t.gpa.create(Session);
-    s.* = .{ .tracer = t, .host = try t.gpa.dupe(u8, host), .started = now, .last_poll = .init(now) };
+    s.* = .{ .tracer = t, .serial = 0, .host = try t.gpa.dupe(u8, host), .started = now, .last_poll = .init(now) };
     for (&t.slots) |*slot| if (slot.* == null) {
         slot.* = s;
         return s;
@@ -597,7 +756,7 @@ test "at most max_starts_per_min new sessions a minute" {
 
 test "snapshot JSON: hops, responders first, microseconds" {
     var t: Tracer = .{ .gpa = testing.allocator, .io = testing.io };
-    var s: Session = .{ .tracer = &t, .host = @constCast("x"), .started = 100, .last_poll = .init(100) };
+    var s: Session = .{ .tracer = &t, .serial = 0, .host = @constCast("x"), .started = 100, .last_poll = .init(100) };
     s.address = .{ .v4 = .{ 192, 0, 2, 1 } };
     s.rounds = 2;
     var st: traceroute.MtrHop = .{ .ttl = 1, .sent = 2, .received = 1, .last_ns = 1_500_000, .best_ns = 1_500_000, .worst_ns = 1_500_000, .sum_ns = 1_500_000 };
@@ -620,6 +779,6 @@ test "snapshot JSON: hops, responders first, microseconds" {
     defer out.deinit();
     try s.writeJson(&out.writer, 130);
     try testing.expectEqualStrings(
-        \\{"state":"running","reason":"running","address":"192.0.2.1","unprivileged":false,"rounds":2,"reached":false,"age":30,"max_age":600,"hops":[{"ttl":1,"hosts":["10.0.0.2","10.0.0.1"],"names":["gw.example",null],"sent":2,"recv":1,"loss":500,"last":1500,"avg":1500,"best":1500,"worst":1500,"jitter":null,"code":null,"spark":[null,1500]}]}
+        \\{"state":"running","reason":"running","address":"192.0.2.1","unprivileged":false,"rounds":2,"reached":false,"age":30,"max_age":600,"hops":[{"ttl":1,"hosts":["10.0.0.2","10.0.0.1"],"names":["gw.example",null],"sent":2,"recv":1,"loss":500,"last":1500,"avg":1500,"best":1500,"worst":1500,"jitter":null,"code":null,"shared":false,"spark":[null,1500]}]}
     , out.written());
 }

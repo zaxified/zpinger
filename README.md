@@ -121,8 +121,20 @@ second one ICMP probe goes to each hop (TTL 1, 2, …, up to the destination,
 or 30 hops while it has not answered), 20 ms apart, and each hop keeps its
 loss and its last, average, best and worst round-trip time and jitter, plus
 the last minute as a sparkline. Loss at one hop that the hops after it do
-not show is usually that router limiting its ICMP answers, not loss on the
-path. It runs on the same unprivileged ping socket as the probing (zig-libs
+not show is that router limiting its ICMP answers, not loss on the path:
+the page shows it grey, with the path's own loss in its tooltip, and keeps
+red for loss that carries on to the end.
+
+All traces of one address family run together, as members of one zig-libs
+`traceroute.MtrSet` on one socket. Where their paths cross the same routers
+(your gateway, your ISP), each such hop gets one probe a second, not one per
+trace, and every trace shows that answer (a dotted hop number). Routers
+limit their ICMP answers per source, often to about one a second, so
+without this every extra trace would make the shared hops look lossier. A
+hop is shared only once both traces have seen the same router there a few
+times in a row (or one of them nothing at all, with agreeing routers after
+it), and each trace probes its whole path itself every 30 seconds, so a
+path that changes stops sharing. It runs on the same unprivileged ping socket as the probing (zig-libs
 `traceroute`, which reads the routers' answers from the socket's error
 queue), so it needs no capability either. Hops are named by reverse DNS
 (PTR, through the system resolver, one lookup at a time beside the trace so
@@ -175,7 +187,7 @@ not the expected one is shown as "no data".
 | `POST /api/targets/ID/pause`, `/resume` | stop and resume probing |
 | `POST /api/targets/ID/ack`, `/unack` | acknowledge a DOWN target, or withdraw the acknowledgement |
 | `POST /api/targets/ID/trace` | start a live trace of the target's host, or join the running one; `202`; `429` when this viewer watches 2 traces already or 10 traces started in the last minute; `503` when `--trace-max` traces run; `403` when traces are off |
-| `GET /api/targets/ID/trace` | the trace: `state`, `reason`, `rounds`, `reached`, and per hop `ttl`, `hosts` (latest first), `names` (reverse DNS of `hosts[i]`, `null` = none or not yet), `sent`, `recv`, `loss` (‰), `last`/`avg`/`best`/`worst`/`jitter` (µs, `null` = none), `code` (Destination Unreachable), `spark` (the last 60 rounds, µs or `null` = lost); polling is watching: it keeps the trace running and counts against the viewer's 2 (`429` over that); `404` when none runs |
+| `GET /api/targets/ID/trace` | the trace: `state`, `reason`, `rounds`, `reached`, and per hop `ttl`, `hosts` (latest first), `names` (reverse DNS of `hosts[i]`, `null` = none or not yet), `sent`, `recv`, `loss` (‰), `last`/`avg`/`best`/`worst`/`jitter` (µs, `null` = none), `code` (Destination Unreachable), `shared` (the last answer came from a probe shared with other traces), `spark` (the last 60 rounds, µs or `null` = lost); polling is watching: it keeps the trace running and counts against the viewer's 2 (`429` over that); `404` when none runs |
 | `DELETE /api/targets/ID/trace` | stop watching it; the trace stops when its last viewer has |
 | `GET /healthz` | `200 {"ok":true,"read_only":...,"demo":...}` while cycles keep finishing (at most 3 cycles apart) and the ICMP socket opens; `503` otherwise. Unreachable targets do not count: they are what is being monitored |
 

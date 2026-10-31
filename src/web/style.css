@@ -204,6 +204,8 @@ button.pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .hops td.hop-host .hop-addr + .hop-addr { color: var(--muted); font-size: 12px; }
 .hops .muted { color: var(--muted); }
 .hops .bad { color: var(--down); }
+.hops .limited { color: var(--muted); text-decoration: underline dotted; cursor: help; }
+.hops td.shared { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
 .hops td.spark { padding-top: 2px; padding-bottom: 0; }
 .hops .spark rect.ok { fill: var(--accent); }
 .hops .spark rect.lost { fill: var(--down); opacity: 0.6; }
