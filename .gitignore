@@ -4,3 +4,4 @@ zig-pkg/
 .zig-toolchain/
 history.json
 history.json.bad
+.dev/
