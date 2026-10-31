@@ -10,8 +10,9 @@
 //! - at most `max_sessions` sessions at once (`--trace-max`, 0 disables),
 //!   `max_starts_per_min` new ones a minute, `max_per_viewer` per viewer
 //!   (a client address, see `Viewer`);
-//! - a session stops when no viewer polled it for `idle_s` (or the last one
-//!   left), and `max_age_s` after it started, whatever the page does;
+//! - a session stops when no viewer polled it for `Tracer.idle_s` (or the
+//!   last one left), and `Tracer.max_age_s` after it started, whatever the
+//!   page does (both shorter on a read-only instance, see `Limits`);
 //! - every trace of one address family is a member of one zig-libs
 //!   `traceroute.MtrSet` (`Engine`): one socket, rounds at most once a
 //!   second, probes paced `gap_ms` apart, and a hop shared by several
@@ -39,10 +40,18 @@ const log = std.log.scoped(.trace);
 pub const max_hops = 30;
 /// Rounds kept per hop for the sparkline.
 pub const spark_len = 60;
-/// A session nobody polled for this long stops.
-pub const idle_s = 30;
-/// And none runs longer than this; the page can start a new one.
-pub const max_age_s = 10 * 60;
+/// How long a trace runs: it stops `idle_s` after its last poll (a page
+/// in a background tab does not poll), and `max_age_s` after it started in
+/// any case; the page can start a new one. A writable instance is the
+/// owner's own, so its traces wait for a viewer who switched away; a
+/// read-only one is public, so a forgotten tab frees its trace soon.
+pub const Limits = struct {
+    idle_s: i64,
+    max_age_s: i64,
+
+    pub const writable: Limits = .{ .idle_s = 10 * 60, .max_age_s = 60 * 60 };
+    pub const read_only: Limits = .{ .idle_s = 60, .max_age_s = 10 * 60 };
+};
 /// Upper bound of `--trace-max`.
 pub const max_slots = 16;
 /// Hop addresses a session looks up a name for: every responder of every hop.
@@ -93,6 +102,7 @@ pub const Tracer = struct {
     gpa: std.mem.Allocator,
     io: Io,
     max_sessions: u8 = 4,
+    limits: Limits = .writable,
     /// Look up hop names (reverse DNS).
     names: bool = true,
     mutex: Io.Mutex = .init,
@@ -243,9 +253,9 @@ pub const Tracer = struct {
         return null;
     }
 
-    /// Forgets watches not polled for `idle_s`, and those of finished sessions.
+    /// Forgets watches not polled for `limits.idle_s`, and those of finished sessions.
     fn expireWatches(t: *Tracer, now: i64) void {
-        for (&t.watches) |*w| if (w.*) |x| if (now - x.last_poll > idle_s or x.session.finished.load(.acquire)) {
+        for (&t.watches) |*w| if (w.*) |x| if (now - x.last_poll > t.limits.idle_s or x.session.finished.load(.acquire)) {
             w.* = null;
         };
     }
@@ -501,8 +511,9 @@ const Session = struct {
             const failure = s.failure.load(.acquire);
             if (failure != .running) return failure;
             const now = s.tracer.clock();
-            if (now - s.last_poll.load(.monotonic) > idle_s) return .idle;
-            if (now - s.started > max_age_s) return .max_age;
+            const limits = s.tracer.limits;
+            if (now - s.last_poll.load(.monotonic) > limits.idle_s) return .idle;
+            if (now - s.started > limits.max_age_s) return .max_age;
             io.sleep(.fromMilliseconds(session_poll_ms), .awake) catch return .stopped;
         }
     }
@@ -602,7 +613,9 @@ const Session = struct {
         try j.objectField("age");
         try j.write(now - s.started);
         try j.objectField("max_age");
-        try j.write(max_age_s);
+        try j.write(s.tracer.limits.max_age_s);
+        try j.objectField("idle");
+        try j.write(s.tracer.limits.idle_s);
         try j.objectField("hops");
         try j.beginArray();
         for (s.hops[0..s.hop_n]) |*h| {
@@ -718,7 +731,7 @@ test "a viewer watches at most max_per_viewer traces; watches expire" {
     try testing.expectError(error.ViewerLimit, t.watch(viewer_a, s3, 5));
     try t.watch(viewer_b, s3, 5); // another viewer is not limited by a's
     try testing.expectEqual(@as(i64, 5), s1.last_poll.load(.monotonic));
-    t.expireWatches(5 + idle_s + 1);
+    t.expireWatches(5 + t.limits.idle_s + 1);
     try testing.expectEqual(@as(usize, 0), t.watchCount(viewer_a));
     try t.watch(viewer_a, s3, 40);
 }
@@ -779,6 +792,6 @@ test "snapshot JSON: hops, responders first, microseconds" {
     defer out.deinit();
     try s.writeJson(&out.writer, 130);
     try testing.expectEqualStrings(
-        \\{"state":"running","reason":"running","address":"192.0.2.1","unprivileged":false,"rounds":2,"reached":false,"age":30,"max_age":600,"hops":[{"ttl":1,"hosts":["10.0.0.2","10.0.0.1"],"names":["gw.example",null],"sent":2,"recv":1,"loss":500,"last":1500,"avg":1500,"best":1500,"worst":1500,"jitter":null,"code":null,"shared":false,"spark":[null,1500]}]}
+        \\{"state":"running","reason":"running","address":"192.0.2.1","unprivileged":false,"rounds":2,"reached":false,"age":30,"max_age":3600,"idle":600,"hops":[{"ttl":1,"hosts":["10.0.0.2","10.0.0.1"],"names":["gw.example",null],"sent":2,"recv":1,"loss":500,"last":1500,"avg":1500,"best":1500,"worst":1500,"jitter":null,"code":null,"shared":false,"spark":[null,1500]}]}
     , out.written());
 }

@@ -6,6 +6,14 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
+- **Trace: copy, limits, width.** A Copy button puts the trace table on the
+  clipboard as text (`mtr --report` style); a click on a hop's address
+  copies the address alone; a text selection in the table pauses its
+  refresh. A trace idles out after 10 minutes without a viewer on a
+  writable instance, 60 s on a read-only one (`--trace-idle`), and stops
+  after 1 hour / 10 minutes in any case (`--trace-age`); JSON `idle`. On a
+  wide screen an address is never cut (an IPv6 one fits whole), only a long
+  name. The trace buttons get the accent border on hover like the others.
 - **Live traces share their common hops** (zig-libs `traceroute.MtrSet`, one
   socket per address family): a router several traces cross gets one probe a
   second, not one per trace, so its per-source ICMP limit no longer shows as

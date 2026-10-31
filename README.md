@@ -77,6 +77,8 @@ zig build                     # ReleaseSafe by default
 | `--cycle SECONDS` | `60` | seconds between cycles (the tests use 5) |
 | `--trace-max N` | `4` | live traces running at once, 0 turns them off ([Live trace](#live-trace)) |
 | `--trace-names on\|off` | `on` | reverse-DNS names of the trace hops |
+| `--trace-idle SECONDS` | `600`, read-only `60` | stop a live trace nobody watched this long (a background tab does not poll) |
+| `--trace-age SECONDS` | `3600`, read-only `600` | stop every live trace this long after it started |
 | `--trust-proxy on\|off` | `on` | for a request from a loopback peer (your reverse proxy), the viewer of a live trace is the last `X-Forwarded-For` address ([Live trace](#live-trace)) |
 | `--version` | | print the version and exit |
 
@@ -154,11 +156,16 @@ the server bounds it, not the page:
   `X-Forwarded-For` entry, the one the proxy added (`--trust-proxy off`
   ignores it); a peer that is not on loopback cannot have the header
   believed;
-- a trace stops when no viewer polled it for 30 s, and after 10 minutes in
-  any case. Stop (or closing the row) ends only that viewer's watching; the
-  trace goes on while someone else watches it.
+- a trace stops when no viewer polled it for `--trace-idle` (10 minutes on
+  a writable instance, your own, so a trace survives switching away; 60 s on
+  a read-only one, which is public), and after `--trace-age` in any case
+  (1 hour, read-only 10 minutes). Stop (or closing the row) ends only that
+  viewer's watching; the trace goes on while someone else watches it.
 
 The page polls an open trace every second and not at all in a hidden tab.
+Copy puts the whole table on the clipboard as text (like `mtr --report`); a
+click on an address copies just that address. While you select text in the
+table it stops refreshing, so a selection is not lost.
 
 ## How a cycle works
 
@@ -187,7 +194,7 @@ not the expected one is shown as "no data".
 | `POST /api/targets/ID/pause`, `/resume` | stop and resume probing |
 | `POST /api/targets/ID/ack`, `/unack` | acknowledge a DOWN target, or withdraw the acknowledgement |
 | `POST /api/targets/ID/trace` | start a live trace of the target's host, or join the running one; `202`; `429` when this viewer watches 2 traces already or 10 traces started in the last minute; `503` when `--trace-max` traces run; `403` when traces are off |
-| `GET /api/targets/ID/trace` | the trace: `state`, `reason`, `rounds`, `reached`, and per hop `ttl`, `hosts` (latest first), `names` (reverse DNS of `hosts[i]`, `null` = none or not yet), `sent`, `recv`, `loss` (‰), `last`/`avg`/`best`/`worst`/`jitter` (µs, `null` = none), `code` (Destination Unreachable), `shared` (the last answer came from a probe shared with other traces), `spark` (the last 60 rounds, µs or `null` = lost); polling is watching: it keeps the trace running and counts against the viewer's 2 (`429` over that); `404` when none runs |
+| `GET /api/targets/ID/trace` | the trace: `state`, `reason`, `rounds`, `reached`, and per hop `ttl`, `hosts` (latest first), `names` (reverse DNS of `hosts[i]`, `null` = none or not yet), `sent`, `recv`, `loss` (‰), `last`/`avg`/`best`/`worst`/`jitter` (µs, `null` = none), `code` (Destination Unreachable), `shared` (the last answer came from a probe shared with other traces), `spark` (the last 60 rounds, µs or `null` = lost), `max_age` and `idle` (the limits, seconds); polling is watching: it keeps the trace running and counts against the viewer's 2 (`429` over that); `404` when none runs |
 | `DELETE /api/targets/ID/trace` | stop watching it; the trace stops when its last viewer has |
 | `GET /healthz` | `200 {"ok":true,"read_only":...,"demo":...}` while cycles keep finishing (at most 3 cycles apart) and the ICMP socket opens; `503` otherwise. Unreachable targets do not count: they are what is being monitored |
 

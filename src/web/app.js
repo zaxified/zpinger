@@ -509,14 +509,21 @@ const traces = new Map(); // target id -> { data, stopped, error }
 let traceTimer = null;
 let tracePolling = false;
 
-const TRACE_REASONS = {
-  idle: "stopped: nobody watched it for 30 s",
-  max_age: "stopped after 10 minutes",
-  stopped: "stopped",
-  unresolved: "stopped: the host name does not resolve",
-  no_socket: "stopped: the server cannot open an ICMP socket",
-  failed: "stopped: probing failed",
-};
+// Seconds as the server's limits are set: "60 s", "10 min", "1 h".
+const duration = (s) => (s % 60 ? `${s} s` : s % 3600 ? `${s / 60} min` : `${s / 3600} h`);
+
+// Why a trace stopped; `d` is its last data (the limits come with it).
+function traceReason(reason, d) {
+  const texts = {
+    idle: `stopped: nobody watched it for ${duration(d?.idle ?? 60)}`,
+    max_age: `stopped after ${duration(d?.max_age ?? 600)}`,
+    stopped: "stopped",
+    unresolved: "stopped: the host name does not resolve",
+    no_socket: "stopped: the server cannot open an ICMP socket",
+    failed: "stopped: probing failed",
+  };
+  return texts[reason] || "stopped";
+}
 
 async function traceCall(method, t) {
   const res = await fetch(`api/targets/${t}/trace`, { method, headers: { "content-type": "application/json" }, body: method === "GET" ? undefined : "{}" });
@@ -559,17 +566,72 @@ async function pollTracesOnce() {
     try {
       tr.data = await traceCall("GET", id);
       tr.error = null;
-      if (tr.data.state !== "running") tr.stopped = TRACE_REASONS[tr.data.reason] || "stopped";
+      if (tr.data.state !== "running") tr.stopped = traceReason(tr.data.reason, tr.data);
     } catch (err) {
-      if (err.status === 404) tr.stopped = TRACE_REASONS.idle;
+      if (err.status === 404) tr.stopped = traceReason("idle", tr.data);
       else if (err.status === 429 || err.status === 503) tr.stopped = `stopped: ${err.message}`;
       else tr.error = `Cannot reach the server (${err.message}), retrying…`;
     }
     const panel = $(`[data-target="${id}"] .trace`);
     const t = state.targets.find((x) => x.id === id);
-    if (panel && t) renderTrace(panel, t);
+    // Someone selecting text in the table: keep it still (the data moves on).
+    if (panel && t && !selectingIn(panel)) renderTrace(panel, t);
   }
 }
+
+const selectingIn = (node) => {
+  const sel = document.getSelection();
+  return !!sel && !sel.isCollapsed && sel.rangeCount > 0 && node.contains(sel.getRangeAt(0).commonAncestorContainer);
+};
+
+// The clipboard API needs a secure context (https, localhost); a plain-http
+// address on the LAN gets the old execCommand path.
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {}
+  }
+  const ta = el("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {}
+  ta.remove();
+  return ok;
+}
+
+// The trace as plain text, like `mtr --report`: one line per hop, further
+// responders of a load-balanced hop on lines of their own.
+function traceText(t, d) {
+  const pct = (p) => `${(p / 10).toFixed(1)}%`;
+  const rows = [["#", "Host", "Loss", "Sent", "Last", "Avg", "Best", "Worst", "Jitter"]];
+  for (const h of d.hops) {
+    const names = h.hosts.length ? h.hosts.map((a, i) => (h.names?.[i] ? `${a} ${h.names[i]}` : a)) : ["???"];
+    rows.push([String(h.ttl), names[0], pct(h.loss), String(h.sent), ...["last", "avg", "best", "worst", "jitter"].map((k) => usMs(h[k]))]);
+    for (const n of names.slice(1)) rows.push(["", n, "", "", "", "", "", "", ""]);
+  }
+  const width = rows[0].map((_, c) => Math.max(...rows.map((r) => r[c].length)));
+  const lines = rows.map((r) => r.map((v, c) => (c === 1 ? v.padEnd(width[c]) : v.padStart(width[c]))).join("  ").trimEnd());
+  const when = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
+  return `Route to ${d.address || t.host} (${t.host}), ${d.rounds} rounds, ${when}\n` + lines.join("\n") + "\n";
+}
+
+// Shows "copied" on the thing just copied, across the per-second rebuilds.
+function flashCopied(tr, key, panel, t) {
+  tr.copied = { key, until: Date.now() + 1500 };
+  renderTrace(panel, t);
+  setTimeout(() => {
+    if (tr.copied?.key === key && Date.now() >= tr.copied.until && !selectingIn(panel)) renderTrace(panel, t);
+  }, 1600);
+}
+const isCopied = (tr, key) => tr.copied?.key === key && Date.now() < tr.copied.until;
 
 const usMs = (v) => (v === null ? "–" : v < 10000 ? (v / 1000).toFixed(2) : (v / 1000).toFixed(1));
 
@@ -605,6 +667,15 @@ function renderTrace(panel, t) {
       renderTrace(panel, t);
     }
   });
+  if (d && d.hops.length) {
+    const copy = el("button", isCopied(tr, "table") ? "copied" : null, isCopied(tr, "table") ? "Copied ✓" : "Copy");
+    copy.type = "button";
+    copy.title = "Copy the whole table as text (a click on an address copies just that address)";
+    copy.addEventListener("click", async () => {
+      if (await copyText(traceText(t, tr.data))) flashCopied(tr, "table", panel, t);
+    });
+    head.append(copy);
+  }
   head.append(again);
 
   const table = el("table", "hops");
@@ -626,9 +697,21 @@ function renderTrace(panel, t) {
         ...h.hosts.map((a, i) => {
           const name = h.names?.[i];
           const s = el("span", "hop-addr");
-          s.append(el("span", "ip", a));
+          const key = `ip ${h.ttl} ${a}`;
+          const ip = el("span", isCopied(tr, key) ? "ip copied" : "ip", a);
+          ip.tabIndex = 0;
+          ip.setAttribute("role", "button");
+          const copyIp = async (ev) => {
+            ev.preventDefault();
+            if (await copyText(a)) flashCopied(tr, key, panel, t);
+          };
+          ip.addEventListener("click", copyIp);
+          ip.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter" || ev.key === " ") copyIp(ev);
+          });
+          s.append(ip);
           if (name) s.append(" ", el("span", "name", name));
-          s.title = name ? `${a} ${name}` : a;
+          s.title = `${name ? `${a} ${name}` : a}\n${isCopied(tr, key) ? "Copied" : "Click the address to copy it"}`;
           return s;
         }),
       );

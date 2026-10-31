@@ -29,6 +29,10 @@ const usage =
     \\  --cycle SECONDS      seconds between probing cycles (default 60)
     \\  --trace-max N        live traces (target detail) running at once (default 4, 0 = off)
     \\  --trace-names on|off reverse-DNS names of the trace hops (default on)
+    \\  --trace-idle SECONDS stop a trace nobody watched this long
+    \\                       (default 600, read-only 60)
+    \\  --trace-age SECONDS  stop every trace this long after it started
+    \\                       (default 3600, read-only 600)
     \\  --trust-proxy on|off take the client address of a request from a loopback
     \\                       peer (a reverse proxy) from X-Forwarded-For (default on)
     \\  --version            print the version and exit
@@ -47,6 +51,8 @@ pub fn main(init: std.process.Init) !void {
     defer hosts.deinit(gpa);
     var tracer_state: Tracer = .{ .gpa = gpa, .io = io };
     defer tracer_state.deinit();
+    var trace_idle: ?i64 = null;
+    var trace_age: ?i64 = null;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -88,6 +94,12 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, value, "off")) {
                 tracer_state.names = false;
             } else return fail(io, "--trace-names is on or off");
+        } else if (std.mem.eql(u8, arg, "--trace-idle")) {
+            trace_idle = std.fmt.parseInt(u31, value, 10) catch return fail(io, "bad --trace-idle");
+            if (trace_idle.? < 10) return fail(io, "--trace-idle must be at least 10");
+        } else if (std.mem.eql(u8, arg, "--trace-age")) {
+            trace_age = std.fmt.parseInt(u31, value, 10) catch return fail(io, "bad --trace-age");
+            if (trace_age.? < 10) return fail(io, "--trace-age must be at least 10");
         } else if (std.mem.eql(u8, arg, "--trust-proxy")) {
             if (std.mem.eql(u8, value, "on")) {
                 trust_proxy = true;
@@ -98,6 +110,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     allowed_hosts = hosts.items;
+    tracer_state.limits = if (monitor.read_only) .read_only else .writable;
+    if (trace_idle) |v| tracer_state.limits.idle_s = v;
+    if (trace_age) |v| tracer_state.limits.max_age_s = v;
     tracer = &tracer_state;
     monitor.loadConfig() catch |err| fatal(io, "cannot load the targets from {s}: {t}", .{ monitor.config_path, err });
     monitor.loadHistory() catch |err| fatal(io, "cannot load the history from {s}: {t} (move it away to start afresh)", .{ monitor.history_path.?, err });

@@ -193,14 +193,22 @@ button.pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   font: inherit; font-size: 13px; padding: 3px 10px; border-radius: 6px; cursor: pointer;
   border: 1px solid var(--line); background: var(--bg); color: var(--text);
 }
+.trace-head button:hover { border-color: var(--accent); }
+.trace-head button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.trace-head button.copied { border-color: var(--accent); color: var(--accent); }
 .hops-wrap { overflow-x: auto; margin-top: 8px; }
 .hops { border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .hops th { text-align: right; font-weight: 500; color: var(--muted); padding: 3px 8px; border-bottom: 1px solid var(--line); cursor: help; }
 .hops th:nth-child(2), .hops td.hop-host { text-align: left; }
 .hops td { padding: 3px 8px; text-align: right; border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent); }
-/* One responder per line: address, then its name, cut on the right. */
-.hops td.hop-host .hop-addr { display: block; max-width: 34ch; overflow: hidden; text-overflow: ellipsis; }
-.hops td.hop-host .name { color: var(--muted); }
+/* One responder per line: the address whole (an IPv6 one is up to 39
+   characters), then its name, cut on the right past 64 characters. */
+.hops td.hop-host .hop-addr { display: flex; gap: 0.5em; max-width: 64ch; }
+.hops td.hop-host .ip { flex: none; cursor: copy; border-radius: 4px; }
+.hops td.hop-host .ip:hover { color: var(--accent); }
+.hops td.hop-host .ip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.hops td.hop-host .ip.copied { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.hops td.hop-host .name { color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .hops td.hop-host .hop-addr + .hop-addr { color: var(--muted); font-size: 12px; }
 .hops .muted { color: var(--muted); }
 .hops .bad { color: var(--down); }
@@ -262,8 +270,9 @@ footer a { color: inherit; }
   .beats { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; }
   /* Phone: the name goes under the address, both cut to fit, so the
      minigraph and the loss stay on screen without scrolling. */
-  .hops td.hop-host .hop-addr { max-width: 38vw; }
-  .hops td.hop-host .name { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+  .hops td.hop-host .hop-addr { flex-direction: column; gap: 0; max-width: 38vw; }
+  .hops td.hop-host .ip { overflow: hidden; text-overflow: ellipsis; }
+  .hops td.hop-host .name { font-size: 12px; }
   .hops td.hop-host .hop-addr + .hop-addr { margin-top: 2px; }
   .hops th, .hops td { padding-left: 5px; padding-right: 5px; }
   .hops .spark svg { width: 80px; }
