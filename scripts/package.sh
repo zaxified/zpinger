@@ -4,14 +4,14 @@
 # host has (init-system-helpers, for the maintainer scripts) and installs on
 # any Debian or Ubuntu: `apt install ./zpinger_<version>_amd64.deb`.
 #
-#   ./package.sh [--skip-tests] [OUTDIR]     (default OUTDIR: zig-out/deb)
+#   scripts/package.sh [--skip-tests] [OUTDIR]     (default OUTDIR: zig-out/deb)
 #
 # Before packing, the native package's own (stripped) binary runs the smoke
 # test. Needs dpkg-deb. Also ships the about page for a demo hub
 # (zig build about) in /usr/share/zpinger/about/.
 set -eu
 
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 # zig-env.sh finds the repository from its own path ($0).
 ZIG=$(sh -c '. "$0" && printf %s "$ZIG"' "$HERE/scripts/zig-env.sh")
 
@@ -36,11 +36,11 @@ for pair in x86_64-linux:amd64 aarch64-linux:arm64; do
     rm -rf "$stage"
     "$ZIG" build -Dtarget="$target" -Dstrip=true --prefix "$stage/usr"
     if [ -n "$TESTS" ] && [ "$target" = "$(uname -m)-linux" ]; then
-        sh smoke.sh "$stage/usr/bin/zpinger"
+        sh scripts/smoke.sh "$stage/usr/bin/zpinger"
     fi
 
     install -D -m 0644 deploy/zpinger.service "$stage/usr/lib/systemd/system/zpinger.service"
-    install -D -m 0644 targets.json "$stage/usr/share/zpinger/targets.json"
+    install -D -m 0644 deploy/targets.json "$stage/usr/share/zpinger/targets.json"
     install -D -m 0644 deploy/demo-targets.json "$stage/usr/share/zpinger/demo-targets.json"
     install -D -m 0644 deploy/Caddyfile "$stage/usr/share/zpinger/Caddyfile"
     # CrowdSec acquisition, parser and scenarios for the security log.

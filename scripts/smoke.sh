@@ -2,16 +2,16 @@
 # End-to-end smoke test: run the daemon against loopback targets with a short
 # cycle, then check the API, the write endpoints and the read-only mode.
 #
-#   ./smoke.sh [path/to/zpinger]
+#   scripts/smoke.sh [path/to/zpinger]
 #
 # Inside this repository it re-runs itself in an isolated network namespace
 # (scripts/netns-run: loopback up, unprivileged ICMP sockets); a standalone
 # copy runs on the host and needs net.ipv4.ping_group_range to cover you.
 set -eu
 
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-BIN=$(realpath "${1:-$HERE/zig-out/bin/zpinger}")
-NETNS_RUN="$HERE/scripts/netns-run"
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+BIN=$(realpath "${1:-$ROOT/zig-out/bin/zpinger}")
+NETNS_RUN="$ROOT/scripts/netns-run"
 if [ -z "${ZPINGER_NETNS:-}" ] && [ -x "$NETNS_RUN" ]; then
     exec "$NETNS_RUN" sh "$0" "$BIN"
 fi

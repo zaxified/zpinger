@@ -1,11 +1,16 @@
 # zpinger
 
+[![CI](https://github.com/zaxified/zpinger/actions/workflows/ci.yml/badge.svg)](https://github.com/zaxified/zpinger/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/zaxified/zpinger?include_prereleases&sort=semver)](https://github.com/zaxified/zpinger/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Zig 0.17](https://img.shields.io/badge/Zig-0.17-f7a41d.svg)](https://ziglang.org)
+
 A small ping monitor built on [zig-libs](https://github.com/zaxified/zig-libs): a daemon that pings a
 handful of targets once a minute and serves a web page with the last 24 hours.
 
 ![zpinger: eight hosts with status, tags, recent cycles and uptime; one row expanded to its 24-hour latency chart and a live trace of the route, hop by hop](doc/screenshot.png)
 
-<sub>Sample data: one target paused, one acknowledged, one row expanded.</sub>
+<sub>The read-only demo (`--demo`, sample data): one target down, one row expanded with a live trace. The route is made up from documentation addresses.</sub>
 
 - one row per target with its status, a strip of recent cycles (green: all
   replies, orange: some lost, red: all lost), 24-hour uptime and current latency;
@@ -335,13 +340,13 @@ traces); `--access-log off` drops the `http` lines too.
 ## Deploying
 
 Every zpinger release carries `zpinger_<version>_amd64.deb` and
-`_arm64.deb` (built by `package.sh`; checksums in `SHA256SUMS`). The binary is
+`_arm64.deb` (built by `scripts/package.sh`; checksums in `SHA256SUMS`). The binary is
 static; the package needs only `init-system-helpers`, which every Debian or
 Ubuntu with systemd has.
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS
-apt install ./zpinger_1.0.0_amd64.deb
+apt install ./zpinger_0.2.0_amd64.deb
 ```
 
 That installs, enables and starts `zpinger.service` on `127.0.0.1:8080`,
@@ -371,7 +376,8 @@ Upgrades restart the service (and leave it alone if you disabled it).
 `apt remove` keeps the settings, the list and the history; `apt purge`
 deletes them.
 
-zpinger was called `fping-watch` up to 1.0.0. The package conflicts with the
+zpinger was called `fping-watch` up to 1.0.0 (released inside zig-fping);
+as its own project it starts again at 0.2. The package conflicts with the
 old `fping-watch` package (same default port); its `/etc/fping-watch/env`
 and `/var/lib/fping-watch/` are not carried over (variables are now
 `ZPINGER_*`).
@@ -420,13 +426,13 @@ runs writable; the health check then insists on read-only.
   notify: restart zpinger
 - name: zpinger package
   ansible.builtin.get_url:
-    url: https://github.com/zaxified/zpinger/releases/download/vX.Y.Z/zpinger_1.0.0_amd64.deb
-    dest: /var/cache/zpinger_1.0.0_amd64.deb
+    url: https://github.com/zaxified/zpinger/releases/download/v0.2.0/zpinger_0.2.0_amd64.deb
+    dest: /var/cache/zpinger_0.2.0_amd64.deb
     # Pinned from the release's SHA256SUMS: a checksum fetched along with
     # the package would prove nothing.
     checksum: "sha256:<the hash from SHA256SUMS>"
 - name: zpinger installed
-  ansible.builtin.apt: { deb: /var/cache/zpinger_1.0.0_amd64.deb }
+  ansible.builtin.apt: { deb: /var/cache/zpinger_0.2.0_amd64.deb }
 - name: zpinger is healthy and read-only
   ansible.builtin.uri: { url: "http://127.0.0.1:8080/healthz" }
   register: health
@@ -510,15 +516,25 @@ Ansible, after the package is installed on the same host:
 ## Tests
 
 ```sh
-zig build test     # unit tests: status, acknowledgement, history ring, cache, health, persistence, Host guard, validation, escaping
-sh smoke.sh        # end to end: loopback targets, API, ETag, health, Host guard, deadline, read-only mode
-./package.sh       # the .deb packages; smoke-tests the packaged binary first
+zig build test        # unit tests: status, acknowledgement, history ring, cache, health, persistence, Host guard, validation, escaping
+sh scripts/smoke.sh   # end to end: loopback targets, API, ETag, health, Host guard, deadline, read-only mode
+sh scripts/package.sh # the .deb packages; smoke-tests the packaged binary first
 ```
 
-`smoke.sh` runs itself in an isolated network namespace through
-`scripts/netns-run`; `package.sh` resolves Zig through `scripts/zig-env.sh`.
+`scripts/smoke.sh` runs itself in an isolated network namespace through
+`scripts/netns-run`; `scripts/package.sh` resolves Zig through `scripts/zig-env.sh`.
 `scripts/test.sh` runs all of it (plus `zig fmt --check`) and is what CI
 runs; a `v*` tag runs it too and publishes the packages as a GitHub release.
+
+To try a change in a browser, `scripts/dev-instances.sh restart` builds and
+(re)starts a writable instance on `127.0.0.1:18080` and the read-only demo
+on `0.0.0.0:18090`, keeping their state in `.dev/`; `status`, `stop` and
+`log rw|ro` do what they say.
+
+## Contributing and security
+
+Pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Report a
+security problem privately, as [SECURITY.md](SECURITY.md) describes.
 
 ## License
 

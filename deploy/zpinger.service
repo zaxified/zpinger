@@ -1,4 +1,4 @@
-# zpinger, shipped in the .deb (package.sh). Writable on loopback by
+# zpinger, shipped in the .deb (scripts/package.sh). Writable on loopback by
 # default; local settings belong in /etc/zpinger/env, not here:
 #   ZPINGER_LISTEN=ADDR:PORT       (default 127.0.0.1:8080)
 #   ZPINGER_TARGETS=FILE           (default: in the state directory, so

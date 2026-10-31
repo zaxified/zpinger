@@ -18,8 +18,9 @@ it in step with every behaviour change.
 - `src/web/` — `index.html`, `app.js`, `style.css`, `favicon.svg`; `@embedFile`d, so
   rebuild before looking at a UI change in a browser.
 - `tools/about.zig` — `zig build about`: the demo hub's about page from `deploy/about.json`.
-- `deploy/` — systemd unit, Debian packaging files, demo targets, Caddyfile.
-- `package.sh` — both .deb packages + `smoke.sh` on the native one.
+- `deploy/` — systemd unit, Debian packaging files, sample and demo targets, Caddyfile, CrowdSec.
+- `scripts/package.sh` — both .deb packages + `scripts/smoke.sh` on the native one.
+- `scripts/dev-instances.sh` — local test instances (RW 127.0.0.1:18080, RO demo 0.0.0.0:18090), state in `.dev/`.
 
 ## Building and the gate
 
@@ -29,7 +30,7 @@ it in step with every behaviour change.
 - Default build is ReleaseSafe with LLVM; `-Dselfhosted` is for the edit loop only.
 - **The gate is `sh scripts/test.sh`** — fmt, unit tests, both packages, smoke test.
   CI (`.github/workflows/ci.yml`) runs exactly that. A change is done when it passes.
-- Unit tests and `smoke.sh` send real ICMP. `scripts/netns-run` runs them in a private
+- Unit tests and `scripts/smoke.sh` send real ICMP. `scripts/netns-run` runs them in a private
   network namespace (loopback only) with `ping_group_range` opened; it needs unprivileged
   user namespaces (Ubuntu: `kernel.apparmor_restrict_unprivileged_userns=0`). Dependencies
   are fetched before entering it — the namespace has no network.

@@ -1,9 +1,9 @@
 .{
     .name = .zpinger,
-    .version = "1.0.0",
+    .version = "0.2.0",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0x7a949a81c7030d18,
-    .paths = .{ "build.zig", "build.zig.zon", "src", "tools", "deploy", "targets.json", "smoke.sh", "package.sh", "README.md", "LICENSE", "doc" },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "tools", "deploy", "scripts", "README.md", "LICENSE", "doc" },
     .dependencies = .{
         .zig_libs = .{
             .url = "git+https://github.com/zaxified/zig-libs.git#79124c9e73019dc7c354942717fe47c532810fa7",

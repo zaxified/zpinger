@@ -4,7 +4,27 @@ Until 1.0.0 this application lived in the zig-fping repository as
 `example-apps/fping-watch`; its history was carried over (`git filter-repo`),
 and these entries come from zig-fping's CHANGELOG.md.
 
-## Unreleased
+## Unreleased (0.2.0)
+
+- **Versioning starts again at 0.2.** 1.0.0 was fping-watch, an example
+  application inside zig-fping; as a project of its own zpinger is not at
+  1.0 yet. The package is a different one (`zpinger`, conflicting with
+  `fping-watch`), so no upgrade path goes backwards.
+- **Every deadline is reported:** a connection a timeout cut off is
+  `event=conn action=closed reason=timeout` with `requests`, `ms` and the
+  `phase` it stalled in (`no_request`, `head`, `body`, `write`,
+  `response`): a request body or a response read a byte at a time now
+  shows too, not only a connection that never sent a request. A
+  kept-alive connection no next request came on is `reason=idle`, at debug
+  level. The CrowdSec slowloris scenario counts every `timeout`.
+- A second instance on the same port fails to start (zig-libs
+  `http.Server` binds with SO_REUSEADDR alone); the Host guard, the client
+  address behind a proxy and the atomic saves are zig-libs' now
+  (`http.HostGuard`, `ratelimit.clientIp`, `filestore.writeFileAtomic`).
+- `smoke.sh` and `package.sh` moved to `scripts/`, the sample target list
+  to `deploy/targets.json`. `scripts/dev-instances.sh` starts, restarts and
+  stops two local instances (writable and read-only demo) for trying a
+  change in a browser.
 
 - **Security log.** Every refusal, connection drop, change and live trace is
   an event: one line in a fixed shape (`event=http client=... status=429

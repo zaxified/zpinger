@@ -48,7 +48,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
     // The about page for a demo hub, from deploy/about.json, into
-    // zig-out/about/ (package.sh ships it in the .deb). A host tool, not
+    // zig-out/about/ (scripts/package.sh ships it in the .deb). A host tool, not
     // part of the daemon.
     const about_mod = b.createModule(.{
         .root_source_file = b.path("tools/about.zig"),
