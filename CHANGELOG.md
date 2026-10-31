@@ -6,6 +6,11 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
+- **Trace table on narrow screens:** the table keeps its horizontal scroll
+  position across the per-second refresh (it jumped back to the left edge);
+  a hop shows "address name", the name cut with an ellipsis (whole in the
+  tooltip), on a phone under the address; the 60 s sparkline comes right
+  after the host, narrower on a phone, so loss fits without scrolling.
 - **Trace hops named by reverse DNS** (PTR through the system resolver,
   one lookup at a time beside the trace, never delaying a round); the page
   shows "name (address)", the trace JSON gains `names`. `--trace-names off`

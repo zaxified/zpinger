@@ -606,7 +606,7 @@ function renderTrace(panel, t) {
   head.append(again);
 
   const table = el("table", "hops");
-  const cols = [["#", "Hop: the TTL of the probe"], ["Host", "Who answered at this hop (several: a load-balanced hop)"], ["Loss", "Probes without an answer. Loss at a hop that later hops do not show is usually the router limiting its answers, not loss on the path"], ["Sent", "Probes sent to this hop"], ["Last", "Round-trip time of the last answer, ms"], ["Avg", "Average round-trip time, ms"], ["Best", "Best round-trip time, ms"], ["Worst", "Worst round-trip time, ms"], ["Jitter", "Mean change between consecutive round-trip times, ms"], ["Last 60 s", "One bar per round, the height is the round-trip time; red: no answer"]];
+  const cols = [["#", "Hop: the TTL of the probe"], ["Host", "Who answered at this hop, address and reverse-DNS name (several: a load-balanced hop)"], ["Last 60 s", "One bar per round, the height is the round-trip time; red: no answer"], ["Loss", "Probes without an answer. Loss at a hop that later hops do not show is usually the router limiting its answers, not loss on the path"], ["Sent", "Probes sent to this hop"], ["Last", "Round-trip time of the last answer, ms"], ["Avg", "Average round-trip time, ms"], ["Best", "Best round-trip time, ms"], ["Worst", "Worst round-trip time, ms"], ["Jitter", "Mean change between consecutive round-trip times, ms"]];
   const hr = el("tr");
   for (const [name, hint] of cols) {
     const th = el("th", null, name);
@@ -619,26 +619,32 @@ function renderTrace(panel, t) {
     const host = el("td", "hop-host");
     if (h.hosts.length)
       host.append(
+        // Address first, then the name, cut with an ellipsis (the whole in the tooltip).
         ...h.hosts.map((a, i) => {
           const name = h.names?.[i];
-          const s = el("span", null, name ? `${name} (${a})` : a);
-          if (name) s.title = a;
+          const s = el("span", "hop-addr");
+          s.append(el("span", "ip", a));
+          if (name) s.append(" ", el("span", "name", name));
+          s.title = name ? `${a} ${name}` : a;
           return s;
         }),
       );
     else host.append(el("span", "muted", "no answer"));
-    const loss = el("td", h.loss >= 10 ? "num bad" : "num", h.sent ? `${(h.loss / 10).toFixed(h.loss % 10 ? 1 : 0)} %` : "–");
-    if (h.code !== null) loss.title = `Destination Unreachable, code ${h.code}`;
-    row.append(el("td", "num", String(h.ttl)), host, loss, el("td", "num", String(h.sent)));
-    for (const k of ["last", "avg", "best", "worst", "jitter"]) row.append(el("td", "num", usMs(h[k])));
     const spark = el("td", "spark");
     spark.append(renderSpark(h.spark));
-    row.append(spark);
+    const loss = el("td", h.loss >= 10 ? "num bad" : "num", h.sent ? `${(h.loss / 10).toFixed(h.loss % 10 ? 1 : 0)} %` : "–");
+    if (h.code !== null) loss.title = `Destination Unreachable, code ${h.code}`;
+    row.append(el("td", "num", String(h.ttl)), host, spark, loss, el("td", "num", String(h.sent)));
+    for (const k of ["last", "avg", "best", "worst", "jitter"]) row.append(el("td", "num", usMs(h[k])));
     table.append(row);
   }
+  // The panel is rebuilt every second (and on every page render): keep the
+  // horizontal scroll position the viewer chose on a narrow screen.
   const wrap = el("div", "hops-wrap");
   wrap.append(table);
+  wrap.addEventListener("scroll", () => (tr.scrollLeft = wrap.scrollLeft), { passive: true });
   panel.replaceChildren(head, wrap);
+  if (tr.scrollLeft) wrap.scrollLeft = tr.scrollLeft;
 }
 
 function renderSpark(values) {
