@@ -297,7 +297,9 @@ event=http client=198.51.100.7 peer=127.0.0.1 status=429 reason=trace_rate metho
   200 then 10): a flood neither fills the journal, nor buries other
   clients' lines, nor one kind of line another. A line is cut at 4 KiB,
   marked ` ...`; `status` and `reason` come first, so no request can push
-  them out. What was dropped is reported
+  them out. No thread waits for the journal: lines go through a 64 KiB
+  queue, and when the journal falls that far behind, lines are dropped
+  (the server keeps accepting). What was dropped is reported
   every 10 s as `event=log action=dropped class=... count=N`.
 
 | Event | When | Keys |
@@ -306,11 +308,11 @@ event=http client=198.51.100.7 peer=127.0.0.1 status=429 reason=trace_rate metho
 | `conn action=refused` | a connection closed at accept, unanswered | `reason`: `total_cap` (256 open), `per_ip_cap` (16 from one client), `store_full` (too many clients tracked at once) |
 | `conn action=closed` | a connection ended without a single request | `reason`: `timeout` (held until the 10 s read timeout: slowloris), `no_request` (closed by the client: a port scan, TLS on the plain-HTTP port); `requests=0 ms` |
 | `http` | a request, with `--access-log refused` (the default) only those answered 400 or above, with `all` every one | `status reason method path ms bytes ua` (in this order), `host` (with `host_not_allowed`), `xff_ignored` (an X-Forwarded-For from a peer that is not a trusted proxy) |
-| `http reason=bad_request_head` | refused before it was read whole: a malformed head (400), too large (431, 414), a body over 4 KiB (413) | `status`; only the peer is known |
+| `http reason=bad_request_head` | refused before it was read whole: a malformed head (400), too large (431, 414), a body over 4 KiB (413; a chunked one once its reading crosses the cap) | `status`; only the peer is known |
 | `audit` | a change on a writable instance | `action` (`add edit remove tags pause resume ack unack`), `target`, `name`, `host`, `host_was`, `tags` (a count) |
 | `trace` | a live trace asked for, left, or ended | `action`: `start` (or join), `stop`, `end` (no client, `reason`: `idle max_age stopped unresolved no_socket failed`); `target host` |
 | `dns` | a target's name stops resolving or resolves again | `action`: `stale` (no answer from DNS, the last address is probed), `failed` (no address), `recovered`, `moved` (`from addr`); `target host error` |
-| `log action=dropped` | the rate limits dropped lines | `class count` |
+| `log action=dropped` | the rate limits or a full queue dropped lines | `class count` |
 
 `reason` on `http` lines says why a request was refused:
 

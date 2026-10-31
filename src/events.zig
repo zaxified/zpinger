@@ -21,8 +21,10 @@
 //!
 //! Anything a client can make happen is rate-limited, per client (an IPv6
 //! /64) and in total, so a flood can neither fill the journal nor bury
-//! other clients' events; what is dropped is counted and reported as
-//! `event=log action=dropped` every `flush_interval_s`.
+//! other clients' events. No thread waits for stderr: lines go through a
+//! queue that `writeLoop` writes out. What is dropped, by a rate limit or
+//! a full queue, is counted and reported as `event=log action=dropped`
+//! every `flush_interval_s`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -42,12 +44,116 @@ pub fn logFn(
     args: anytype,
 ) void {
     if (@backingInt(lvl) > @backingInt(level)) return;
-    var buf: [256]u8 = undefined;
-    const stderr = std.debug.lockStderr(&buf);
+    _ = put(lvl, scope, .system, format, args);
+}
+
+/// The longest line; a longer one is cut, marked ` ...`.
+const max_line = 4096 + 64;
+
+/// Writes one line: into the queue while `writeLoop` runs, else straight
+/// to stderr. Returns false when the queue was full (the line is counted
+/// as dropped in `class`).
+fn put(
+    comptime lvl: std.log.Level,
+    comptime scope: @EnumLiteral(),
+    class: Class,
+    comptime format: []const u8,
+    args: anytype,
+) bool {
+    var buf: [max_line]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    writeLine(&w, lvl, @tagName(scope), format, args) catch {
+        w.end = buf.len - 5;
+        @memcpy(buf[w.end..][0..5], " ...\n");
+        w.end = buf.len;
+    };
+    const line = w.buffered();
+    if (queue_on.load(.acquire)) {
+        if (enqueue(line)) return true;
+        _ = dropped.getPtr(class).fetchAdd(1, .monotonic);
+        return false;
+    }
+    var sbuf: [256]u8 = undefined;
+    const stderr = std.debug.lockStderr(&sbuf);
     defer std.debug.unlockStderr();
-    const w = &stderr.file_writer.interface;
-    writeLine(w, lvl, @tagName(scope), format, args) catch {};
-    w.flush() catch {};
+    const sw = &stderr.file_writer.interface;
+    sw.writeAll(line) catch {};
+    sw.flush() catch {};
+    return true;
+}
+
+// ----- the queue ------------------------------------------------------------------
+
+/// Lines wait here for `writeLoop`, so that no thread ever blocks on
+/// stderr: under systemd it is a socket to journald, and when journald
+/// falls behind a write blocks. The accept loop emits refusals, and a
+/// blocked write there would stop the server accepting anything. When the
+/// queue is full, lines are dropped and counted like rate-limited ones.
+const queue_size = 64 * 1024;
+var queue_buf: [queue_size]u8 = undefined;
+var queue_len: usize = 0;
+var queue_lock: std.atomic.Mutex = .unlocked;
+/// Bumped on every enqueue; `writeLoop` sleeps on it.
+var queue_seq: std.atomic.Value(u32) = .init(0);
+var queue_on: std.atomic.Value(bool) = .init(false);
+/// What `writeLoop` writes out, taken from the queue in one piece.
+/// Guarded by the stderr lock (`flushQueue`).
+var out_buf: [queue_size]u8 = undefined;
+
+fn enqueue(line: []const u8) bool {
+    {
+        while (!queue_lock.tryLock()) std.atomic.spinLoopHint();
+        defer queue_lock.unlock();
+        if (queue_size - queue_len < line.len) return false;
+        @memcpy(queue_buf[queue_len..][0..line.len], line);
+        queue_len += line.len;
+    }
+    _ = queue_seq.fetchAdd(1, .release);
+    std.Options.debug_io.futexWake(u32, &queue_seq.raw, 1);
+    return true;
+}
+
+/// Takes what is queued into `out_buf`; the caller holds the stderr lock.
+fn take() []const u8 {
+    while (!queue_lock.tryLock()) std.atomic.spinLoopHint();
+    defer queue_lock.unlock();
+    const n = queue_len;
+    @memcpy(out_buf[0..n], queue_buf[0..n]);
+    queue_len = 0;
+    return out_buf[0..n];
+}
+
+/// Writes out what is queued; returns whether there was anything.
+fn flushQueue() bool {
+    var sbuf: [256]u8 = undefined;
+    const stderr = std.debug.lockStderr(&sbuf);
+    defer std.debug.unlockStderr();
+    const lines = take();
+    if (lines.len == 0) return false;
+    const sw = &stderr.file_writer.interface;
+    sw.writeAll(lines) catch {};
+    sw.flush() catch {};
+    return true;
+}
+
+/// Writes out what is queued; from now on lines go straight to stderr.
+/// Callable from any thread (before an exit).
+pub fn stopQueue() void {
+    queue_on.store(false, .release);
+    _ = flushQueue();
+}
+
+/// Writes the queued lines to stderr until canceled; while it runs, no
+/// log call writes stderr itself. Lines queued at cancelation are written
+/// before it returns, later ones go straight to stderr again.
+pub fn writeLoop(io: Io) Io.Cancelable!void {
+    queue_on.store(true, .release);
+    defer stopQueue();
+    while (true) {
+        const seen = queue_seq.load(.acquire);
+        if (flushQueue()) continue;
+        try io.futexWait(u32, &queue_seq.raw, seen);
+    }
 }
 
 fn writeLine(w: *Io.Writer, comptime lvl: std.log.Level, scope: []const u8, comptime format: []const u8, args: anytype) Io.Writer.Error!void {
@@ -117,7 +223,8 @@ pub const Class = enum { client, conn, access, writer, system };
 
 /// Emits `event=<kind> [client=... [peer=...]] <fields>`, where `fields` is
 /// `format` with `args` (use `quote` for any text a client chose).
-/// Returns whether the line was written (false: rate-limited).
+/// Returns whether the line was written (false: rate-limited, or the queue
+/// was full).
 pub fn emit(
     comptime lvl: std.log.Level,
     comptime kind: Kind,
@@ -138,8 +245,7 @@ pub fn emit(
         @memcpy(buf[w.end..][0..4], " ...");
         w.end = buf.len;
     };
-    logFn(lvl, .event, "{s}", .{w.buffered()});
-    return true;
+    return put(lvl, .event, class, "{s}", .{w.buffered()});
 }
 
 fn writeEvent(w: *Io.Writer, kind: []const u8, who: ?Who, comptime format: []const u8, args: anytype) Io.Writer.Error!void {
@@ -272,8 +378,22 @@ fn keyOf(ip: netaddr.Ip) [16]u8 {
 pub fn flushDropped() void {
     for (std.enums.values(Class)) |class| {
         const n = dropped.getPtr(class).swap(0, .monotonic);
-        if (n > 0) _ = emit(.warn, .log, .system, null, "action=dropped class={t} count={d}", .{ class, n });
+        if (n == 0) continue;
+        // The queue is full: report them next time.
+        if (!emit(.warn, .log, .system, null, "action=dropped class={t} count={d}", .{ class, n }))
+            _ = dropped.getPtr(class).fetchAdd(n, .monotonic);
     }
+}
+
+/// Tests: queue lines instead of writing them, for `takeForTest`.
+pub fn captureForTest(on: bool) void {
+    queue_len = 0;
+    queue_on.store(on, .release);
+}
+
+/// Tests: the lines queued since the last call.
+pub fn takeForTest() []const u8 {
+    return take();
 }
 
 /// Calls `flushDropped` every `flush_interval_s` until canceled.
@@ -310,6 +430,28 @@ test "event line: kind, client, peer only when it differs" {
     w.end = 0;
     try writeEvent(&w, "conn", .of(client), "reason=x", .{});
     try testing.expectEqualStrings("event=conn client=198.51.100.7 reason=x", w.buffered());
+}
+
+test "queue: never blocks; a full queue drops and counts, the report waits for room" {
+    captureForTest(true);
+    defer captureForTest(false);
+    _ = dropped.getPtr(.system).swap(0, .monotonic);
+    try testing.expect(emit(.warn, .log, .system, null, "x={d}", .{1}));
+    try testing.expect(std.mem.endsWith(u8, takeForTest(), "event=log x=1\n"));
+    const long: [3000]u8 = @splat('a');
+    try testing.expect(emit(.warn, .log, .system, null, "{s}", .{&long}));
+    const line_len = takeForTest().len;
+    var queued: usize = 0;
+    while (emit(.warn, .log, .system, null, "{s}", .{&long})) queued += 1;
+    try testing.expectEqual(queue_size / line_len, queued);
+    while (emit(.warn, .log, .system, null, "x", .{})) {} // the rest, to the last byte that fits
+    try testing.expectEqual(2, dropped.getPtr(.system).load(.monotonic));
+    flushDropped(); // no room (the report is longer than "x"): kept, plus the report itself
+    try testing.expectEqual(3, dropped.getPtr(.system).load(.monotonic));
+    _ = takeForTest();
+    flushDropped();
+    try testing.expect(std.mem.endsWith(u8, takeForTest(), "action=dropped class=system count=3\n"));
+    try testing.expectEqual(0, dropped.getPtr(.system).load(.monotonic));
 }
 
 test "time: RFC 3339 UTC" {

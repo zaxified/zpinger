@@ -184,6 +184,7 @@ pub fn main(init: std.process.Init) !void {
     // what the probing loop recorded: no viewer ever triggers a ping.
     var tasks: Io.Group = .init;
     defer tasks.cancel(io);
+    try tasks.concurrent(io, events.writeLoop, .{io});
     try tasks.concurrent(io, probeLoop, .{&monitor});
     try tasks.concurrent(io, events.flushLoop, .{io});
     server.serve() catch |err| fatal(io, "serving failed: {t}", .{err});
@@ -367,6 +368,7 @@ fn fail(io: Io, msg: []const u8) noreturn {
 
 /// A startup error: one readable line (systemd shows it), no stack trace.
 fn fatal(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
+    events.stopQueue();
     eprint(io, "zpinger: " ++ fmt ++ "\n", args);
     std.process.exit(1);
 }
@@ -416,8 +418,14 @@ fn handle(req: *Request, rw: *ResponseWriter) anyerror!void {
     defer arena_state.deinit();
     const started = Io.Clock.awake.now(monitor.io).nanoseconds;
     reason = "";
-    defer logRequest(req, rw, monitor.io, started);
-    return route(monitor, req, rw, arena_state.allocator());
+    route(monitor, req, rw, arena_state.allocator()) catch |err| {
+        // Nothing sent: the server answers in our place (413 for a body
+        // over the cap, else 500) and reports it to `onError`; `rw.status`
+        // would still say 200. Something sent: the status went out as is.
+        if (rw.headSent()) logRequest(req, rw, monitor.io, started);
+        return err;
+    };
+    logRequest(req, rw, monitor.io, started);
 }
 
 /// Which requests become `event=http` lines (`--access-log`).
@@ -895,6 +903,24 @@ test "routes: pages, HEAD, state with ETag and gzip, read-only, Host guard, body
         const r = try rec.only();
         try testing.expectEqual(413, r.status);
         try testing.expectEqualStrings("nosniff", r.header("x-content-type-options").?);
+    }
+    {
+        // A chunked body has no length to refuse up front: the server
+        // answers 413 after the handler's read failed, and reports it to
+        // `onError`; the handler's own line must not claim a 200.
+        events.level = .info;
+        defer events.level = .err;
+        access_log = .all;
+        defer access_log = .refused;
+        events.captureForTest(true);
+        defer events.captureForTest(false);
+        const chunk: [5000]u8 = @splat('x');
+        var rec = try testRequest(&m, "POST /api/targets HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1388\r\n" ++ chunk ++ "\r\n0\r\n\r\n");
+        defer rec.deinit();
+        try testing.expectEqual(413, (try rec.only()).status);
+        const lines = events.takeForTest();
+        try testing.expect(std.mem.indexOf(u8, lines, "status=200") == null);
+        try testing.expect(std.mem.indexOf(u8, lines, "event=http") == null); // testRequest has no onError
     }
     {
         var rec = try testRequest(&m, "POST /api/targets/1/pause HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n");

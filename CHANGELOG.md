@@ -13,7 +13,12 @@ and these entries come from zig-fping's CHANGELOG.md.
   quoted and escaped, rate-limited per client and in total. Under systemd
   each line carries its syslog priority; elsewhere a UTC timestamp. New
   `--access-log refused|all|off` (default `refused`: status 400 and up) and
-  `--log-level`. Keys and reason codes: README, "Security log".
+  `--log-level`. Keys and reason codes: README, "Security log". Lines go
+  through a queue written by a task of its own, so a journal that falls
+  behind never stalls the accept loop (a full queue drops and counts); a
+  chunked body cut off at the cap is logged once, as the 413 it got.
+- **Saves are durable across a power loss:** the directory is synced after
+  the rename that replaces the targets or the history file.
 - **CrowdSec** acquisition, parser and six scenarios (live-trace abuse, API
   probing, Host mismatch / DNS rebinding, malformed requests, slowloris,
   connection floods) in `deploy/crowdsec/`, installed to

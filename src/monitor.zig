@@ -939,13 +939,22 @@ fn validateHost(host: []const u8) Error!void {
 
 /// A temporary file next to `path`, synced to disk before it is renamed
 /// over `path`: a crash or power loss leaves the old or the new content,
-/// never an empty or truncated file.
+/// never an empty or truncated file. The directory is synced after the
+/// rename, or a power loss could still bring back the old content.
+/// zig-libs request: filestore — public writeFileAtomic with a directory
+/// fsync (`.sync_dir`); this is it, written out here until then.
 fn writeFileAtomic(io: Io, path: []const u8, data: []const u8) !void {
     var file = try Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true });
     defer file.deinit(io);
     try file.file.writeStreamingAll(io, data);
     try file.file.sync(io);
     try file.replace(io);
+    // `.iterate`: a real read-only descriptor; without it the directory is
+    // opened O_PATH, which fsync refuses (EBADF).
+    const dir = try Io.Dir.cwd().openDir(io, std.fs.path.dirname(path) orelse ".", .{ .iterate = true });
+    defer dir.close(io);
+    const as_file: Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+    try as_file.sync(io);
 }
 
 /// Per-attempt budget of a name lookup. Explicit, so a lookup is bounded
