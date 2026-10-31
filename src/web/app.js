@@ -413,6 +413,7 @@ function renderTarget(t, s, expand) {
     detail.hidden = !show;
     expandButton.setAttribute("aria-expanded", String(show));
     if (show) renderDetail(detail, t, s);
+    else stopTrace(t.id);
   };
   // A click anywhere in the head expands the row, except on its editors.
   // They stop the click themselves: by the time it would get here, they may
@@ -484,6 +485,9 @@ function renderDetail(detail, t, s) {
     actions.append(b);
   };
   const base = `api/targets/${t.id}`;
+  renderTrace($(".trace", detail), t);
+  if (!traces.has(t.id))
+    action("Trace route", "Show the path to this host live, hop by hop, like mtr: one probe to every hop each second, with loss and latency per hop", () => startTrace(t));
   if (t.paused) action("Resume", "Start probing this target again", () => call("POST", `${base}/resume`));
   else action("Pause", "Stop probing this target, e.g. during maintenance; the history is kept", () => call("POST", `${base}/pause`));
   if (t.status === "down" && !t.acked)
@@ -493,6 +497,157 @@ function renderDetail(detail, t, s) {
     () => (state.read_only || confirm(`Remove ${t.name}?`)) && call("DELETE", base).then(() => view.open.delete(t.id)), "danger");
   actions.append(note);
 }
+
+// ----- live trace ---------------------------------------------------------------------
+//
+// The server runs at most a few traces, one per target, shared by every viewer,
+// and stops one nobody polls for 30 s. The page polls the open ones every
+// second, and not at all while hidden.
+
+const traces = new Map(); // target id -> { data, stopped, error }
+let traceTimer = null;
+let tracePolling = false;
+
+const TRACE_REASONS = {
+  idle: "stopped: nobody watched it for 30 s",
+  max_age: "stopped after 10 minutes",
+  stopped: "stopped",
+  unresolved: "stopped: the host name does not resolve",
+  no_socket: "stopped: the server cannot open an ICMP socket",
+  failed: "stopped: probing failed",
+};
+
+async function traceCall(method, t) {
+  const res = await fetch(`api/targets/${t}/trace`, { method, headers: { "content-type": "application/json" }, body: method === "GET" ? undefined : "{}" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status });
+  return data;
+}
+
+async function startTrace(t) {
+  await traceCall("POST", t.id);
+  traces.set(t.id, { data: null, stopped: null, error: null });
+  pollTraces();
+  render();
+}
+
+function stopTrace(id) {
+  if (!traces.has(id)) return;
+  traces.delete(id);
+  traceCall("DELETE", id).catch(() => {});
+  if (traces.size === 0) {
+    clearInterval(traceTimer);
+    traceTimer = null;
+  }
+}
+
+async function pollTraces() {
+  if (traceTimer === null) traceTimer = setInterval(pollTraces, 1000);
+  if (document.hidden || tracePolling) return;
+  tracePolling = true;
+  try {
+    await pollTracesOnce();
+  } finally {
+    tracePolling = false;
+  }
+}
+
+async function pollTracesOnce() {
+  for (const [id, tr] of traces) {
+    if (tr.stopped) continue;
+    try {
+      tr.data = await traceCall("GET", id);
+      tr.error = null;
+      if (tr.data.state !== "running") tr.stopped = TRACE_REASONS[tr.data.reason] || "stopped";
+    } catch (err) {
+      if (err.status === 404) tr.stopped = TRACE_REASONS.idle;
+      else tr.error = `Cannot reach the server (${err.message}), retrying…`;
+    }
+    const panel = $(`[data-target="${id}"] .trace`);
+    const t = state.targets.find((x) => x.id === id);
+    if (panel && t) renderTrace(panel, t);
+  }
+}
+
+const usMs = (v) => (v === null ? "–" : v < 10000 ? (v / 1000).toFixed(2) : (v / 1000).toFixed(1));
+
+function renderTrace(panel, t) {
+  const tr = traces.get(t.id);
+  panel.hidden = !tr;
+  if (!tr) return panel.replaceChildren();
+  const d = tr.data;
+  const head = el("div", "trace-head");
+  const title = el("b", null, `Route to ${d && d.address ? d.address : t.host}`);
+  head.append(title);
+  const facts = [];
+  if (d) {
+    facts.push(`${d.rounds} round${d.rounds === 1 ? "" : "s"}`);
+    if (d.hops.length) facts.push(d.reached ? `destination at hop ${d.hops.length}` : "destination not reached");
+  } else facts.push("starting…");
+  if (tr.stopped) facts.push(tr.stopped);
+  if (tr.error) facts.push(tr.error);
+  head.append(el("span", "note", facts.join(" · ")));
+  const again = el("button", null, tr.stopped ? "Run again" : "Stop");
+  again.type = "button";
+  again.addEventListener("click", async () => {
+    if (!tr.stopped) {
+      stopTrace(t.id);
+      return render();
+    }
+    try {
+      await traceCall("POST", t.id);
+      traces.set(t.id, { data: null, stopped: null, error: null });
+      renderTrace(panel, t);
+    } catch (err) {
+      tr.error = err.message;
+      renderTrace(panel, t);
+    }
+  });
+  head.append(again);
+
+  const table = el("table", "hops");
+  const cols = [["#", "Hop: the TTL of the probe"], ["Host", "Who answered at this hop (several: a load-balanced hop)"], ["Loss", "Probes without an answer. Loss at a hop that later hops do not show is usually the router limiting its answers, not loss on the path"], ["Sent", "Probes sent to this hop"], ["Last", "Round-trip time of the last answer, ms"], ["Avg", "Average round-trip time, ms"], ["Best", "Best round-trip time, ms"], ["Worst", "Worst round-trip time, ms"], ["Jitter", "Mean change between consecutive round-trip times, ms"], ["Last 60 s", "One bar per round, the height is the round-trip time; red: no answer"]];
+  const hr = el("tr");
+  for (const [name, hint] of cols) {
+    const th = el("th", null, name);
+    th.title = hint;
+    hr.append(th);
+  }
+  table.append(hr);
+  for (const h of d ? d.hops : []) {
+    const row = el("tr");
+    const host = el("td", "hop-host");
+    if (h.hosts.length) host.append(...h.hosts.map((a) => el("span", null, a)));
+    else host.append(el("span", "muted", "no answer"));
+    const loss = el("td", h.loss >= 10 ? "num bad" : "num", h.sent ? `${(h.loss / 10).toFixed(h.loss % 10 ? 1 : 0)} %` : "–");
+    if (h.code !== null) loss.title = `Destination Unreachable, code ${h.code}`;
+    row.append(el("td", "num", String(h.ttl)), host, loss, el("td", "num", String(h.sent)));
+    for (const k of ["last", "avg", "best", "worst", "jitter"]) row.append(el("td", "num", usMs(h[k])));
+    const spark = el("td", "spark");
+    spark.append(renderSpark(h.spark));
+    row.append(spark);
+    table.append(row);
+  }
+  const wrap = el("div", "hops-wrap");
+  wrap.append(table);
+  panel.replaceChildren(head, wrap);
+}
+
+function renderSpark(values) {
+  const W = 120, H = 18, n = 60, bw = W / n;
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, "aria-hidden": "true" });
+  const max = Math.max(1, ...values.filter((v) => v !== null));
+  values.forEach((v, i) => {
+    const x = (n - values.length + i) * bw;
+    const h = v === null ? H : Math.max(1.5, (v / max) * H);
+    svg.append(svgEl("rect", { x: x.toFixed(2), y: (H - h).toFixed(2), width: (bw - 0.4).toFixed(2), height: h.toFixed(2), class: v === null ? "lost" : "ok" }));
+  });
+  return svg;
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && traces.size) pollTraces();
+});
 
 // ----- editors ----------------------------------------------------------------------
 //

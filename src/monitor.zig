@@ -145,6 +145,16 @@ pub const Monitor = struct {
         return @intCast(@mod(@divFloor(t, m.cycle_s), history_len));
     }
 
+    /// A copy of target `id`'s host (into `buf`), or null if there is none.
+    pub fn hostOf(m: *Monitor, id: u32, buf: []u8) ?[]const u8 {
+        m.mutex.lockUncancelable(m.io);
+        defer m.mutex.unlock(m.io);
+        const host = m.targets.items[m.find(id) orelse return null].host;
+        if (host.len > buf.len) return null;
+        @memcpy(buf[0..host.len], host);
+        return buf[0..host.len];
+    }
+
     fn find(m: *Monitor, id: u32) ?usize {
         for (m.targets.items, 0..) |t, i| if (t.id == id) return i;
         return null;
@@ -733,7 +743,7 @@ fn writeFileAtomic(io: Io, path: []const u8, data: []const u8) !void {
 }
 
 /// First address of `host`; numeric addresses skip DNS.
-fn resolve(io: Io, host: []const u8) !icmp.Addr {
+pub fn resolve(io: Io, host: []const u8) !icmp.Addr {
     if (icmp.Addr.parse(host)) |addr| return addr else |_| {}
     const HostName = Io.net.HostName;
     var buf: [16]HostName.LookupResult = undefined;

@@ -118,6 +118,19 @@ grep -q '"tags": \["lab","core"\]' targets.json || fail "tags not saved"
 # A form post (no JSON content type) is refused: the CSRF guard.
 got=$(curl -s -o /dev/null -w '%{http_code}' -X POST -d 'x=1' "$URL/api/targets/1/pause")
 [ "$got" = 415 ] || fail "form post: HTTP $got, expected 415"
+# Live trace (mtr style): start, poll until the destination answers, stop.
+status 202 POST /api/targets/1/trace
+i=0
+until curl -sf "$URL/api/targets/1/trace" | grep -q '"reached":true'; do
+    i=$((i + 1)); [ $i -lt 60 ] || fail "trace of 127.0.0.1 never reached it"; sleep 0.1
+done
+curl -sf "$URL/api/targets/1/trace" | grep -q '"hops":\[{"ttl":1,"hosts":\["127.0.0.1"\]' || fail "trace hops: $(curl -s "$URL/api/targets/1/trace")"
+status 202 POST /api/targets/1/trace                  # running already: kept alive
+status 404 POST /api/targets/99/trace
+got=$(curl -s -o /dev/null -w '%{http_code}' -X POST -d 'x=1' "$URL/api/targets/1/trace")
+[ "$got" = 415 ] || fail "trace form post: HTTP $got, expected 415"
+status 200 DELETE /api/targets/1/trace
+status 404 GET /api/targets/1/trace
 grep -q '"paused": true' targets.json || fail "pause not saved"
 grep -q '"acked": true' targets.json || fail "ack not saved"
 wait "$IDLE"
@@ -133,6 +146,20 @@ curl -sf "$URL/healthz" | grep -q '"read_only":true' || fail "/healthz does not 
 curl -sf "$URL/api/state" | grep -q '"loss":\[[^]]*[0-9]' || fail "history lost on restart"
 status 403 POST /api/targets/1/pause
 status 403 DELETE /api/targets/1
+# A trace measures, it changes nothing: offered read-only too.
+status 202 POST /api/targets/1/trace
+status 200 DELETE /api/targets/1/trace
+stop
+
+# --trace-max: 0 turns traces off; the cap counts running sessions.
+start --trace-max 0
+status 403 POST /api/targets/1/trace
+stop
+start --trace-max 1
+status 202 POST /api/targets/1/trace
+status 503 POST /api/targets/2/trace
+status 200 DELETE /api/targets/1/trace
+status 202 POST /api/targets/2/trace
 stop
 
 # Demo: read-only, the hours before the first cycle are sample data.

@@ -32,6 +32,10 @@ handful of targets once a minute and serves a web page with the last 24 hours.
 - add, remove and **pause** targets; **acknowledge** a DOWN target the way
   Nagios does: it shows ACK instead of DOWN until 5 cycles in a row are not DOWN
   again, so the next outage is reported;
+- **live trace** in the detail (like mtr): the path to the target hop by hop,
+  one probe to every hop each second, with loss, last/average/best/worst
+  latency, jitter and a sparkline of the last minute per hop; no root
+  needed ([Live trace](#live-trace));
 - `--read-only` for a public demo: the server refuses every change (HTTP 403);
   the page still shows every control, and using one says it is a demo; every
   control explains itself on hover;
@@ -71,6 +75,7 @@ zig build                     # ReleaseSafe by default
 | `--demo` | off | `--read-only`, and history older than the last hour is sample data, see [below](#sample-data-for-a-demo) |
 | `--allow-host NAME` | | a writable instance also answers to this host name (repeatable), see below |
 | `--cycle SECONDS` | `60` | seconds between cycles (the tests use 5) |
+| `--trace-max N` | `4` | live traces running at once, 0 turns them off ([Live trace](#live-trace)) |
 | `--version` | | print the version and exit |
 
 Pinging needs ICMP sockets: either unprivileged ones
@@ -107,6 +112,25 @@ Within a tier, more packet loss and then more jitter go first, the last hour
 before the last 24 hours. The first three tiers are the `nok` pill; tiers
 4 and 6 (the rest that has been probed) are `ok`.
 
+## Live trace
+
+"Trace route" in a target's detail shows the path to it as mtr does: every
+second one ICMP probe goes to each hop (TTL 1, 2, …, up to the destination,
+or 30 hops while it has not answered), 20 ms apart, and each hop keeps its
+loss and its last, average, best and worst round-trip time and jitter, plus
+the last minute as a sparkline. Loss at one hop that the hops after it do
+not show is usually that router limiting its ICMP answers, not loss on the
+path. It runs on the same unprivileged ping socket as the probing (zig-libs
+`traceroute`, which reads the routers' answers from the socket's error
+queue), so it needs no capability either.
+
+A trace measures and changes nothing, so a read-only demo offers it too;
+the server bounds it, not the page: one trace per target, shared by every
+viewer; at most `--trace-max` at once (default 4, `0` turns traces off); a
+trace stops 30 s after its last poll and after 10 minutes in any case. The
+page polls an open trace every second and not at all in a hidden tab, and
+stops it when the row is closed.
+
 ## How a cycle works
 
 Every cycle (aligned to the wall clock) takes a copy of the active targets,
@@ -133,6 +157,9 @@ not the expected one is shown as "no data".
 | `DELETE /api/targets/ID` | remove |
 | `POST /api/targets/ID/pause`, `/resume` | stop and resume probing |
 | `POST /api/targets/ID/ack`, `/unack` | acknowledge a DOWN target, or withdraw the acknowledgement |
+| `POST /api/targets/ID/trace` | start a live trace of the target (or keep the running one); `202`, `503` when `--trace-max` traces run, `403` when traces are off |
+| `GET /api/targets/ID/trace` | the trace: `state`, `reason`, `rounds`, `reached`, and per hop `ttl`, `hosts` (latest first), `sent`, `recv`, `loss` (‰), `last`/`avg`/`best`/`worst`/`jitter` (µs, `null` = none), `code` (Destination Unreachable), `spark` (the last 60 rounds, µs or `null` = lost); polling keeps it running; `404` when none runs |
+| `DELETE /api/targets/ID/trace` | stop it |
 | `GET /healthz` | `200 {"ok":true,"read_only":...,"demo":...}` while cycles keep finishing (at most 3 cycles apart) and the ICMP socket opens; `503` otherwise. Unreachable targets do not count: they are what is being monitored |
 
 Changes must be sent as `application/json`: a cross-site HTML form cannot do

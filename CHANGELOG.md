@@ -6,6 +6,13 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
+- **Live trace** in the target detail, mtr style: one probe to every hop each
+  second, per hop loss, last/average/best/worst latency, jitter and a
+  sparkline of the last 60 rounds. Unprivileged (a ping socket), offered
+  read-only too; bounded by the server: one trace per target, at most
+  `--trace-max` (default 4, 0 = off), stopped 30 s after the last poll and
+  after 10 minutes. API: `POST|GET|DELETE /api/targets/ID/trace`. Built on
+  zig-libs `traceroute.LiveMtr`.
 - **Pings through zig-libs** (`icmp.Pinger`, the same fping-style paced
   engine) instead of zig-fping; the package's `copyright` carries the
   zig-libs MIT notice. A raw-socket fallback draws a random ICMP ident.

@@ -11,6 +11,8 @@ const Io = std.Io;
 const http = std.http;
 const Monitor = @import("monitor.zig").Monitor;
 const StateTag = @import("monitor.zig").StateTag;
+const Tracer = @import("trace.zig").Tracer;
+const trace = @import("trace.zig");
 
 const log = std.log.scoped(.web);
 
@@ -24,6 +26,7 @@ const usage =
     \\  --demo               --read-only, plus sample data older than the last hour (see README)
     \\  --allow-host NAME    also answer to this host name (repeatable); see README
     \\  --cycle SECONDS      seconds between probing cycles (default 60)
+    \\  --trace-max N        live traces (target detail) running at once (default 4, 0 = off)
     \\  --version            print the version and exit
     \\
 ;
@@ -38,6 +41,8 @@ pub fn main(init: std.process.Init) !void {
     defer monitor.deinit();
     var hosts: std.ArrayList([]const u8) = .empty;
     defer hosts.deinit(gpa);
+    var tracer_state: Tracer = .{ .gpa = gpa, .io = io };
+    defer tracer_state.deinit();
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -70,10 +75,14 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--cycle")) {
             monitor.cycle_s = std.fmt.parseInt(u31, value, 10) catch return fail(io, "bad --cycle");
             if (monitor.cycle_s < 5) return fail(io, "--cycle must be at least 5");
+        } else if (std.mem.eql(u8, arg, "--trace-max")) {
+            tracer_state.max_sessions = std.fmt.parseInt(u8, value, 10) catch return fail(io, "bad --trace-max");
+            if (tracer_state.max_sessions > trace.max_slots) return fail(io, "--trace-max is at most 16");
         } else return fail(io, "unknown option");
     }
 
     allowed_hosts = hosts.items;
+    tracer = &tracer_state;
     monitor.loadConfig() catch |err| fatal(io, "cannot load the targets from {s}: {t}", .{ monitor.config_path, err });
     monitor.loadHistory() catch |err| fatal(io, "cannot load the history from {s}: {t} (move it away to start afresh)", .{ monitor.history_path.?, err });
 
@@ -234,6 +243,9 @@ fn serve(monitor: *Monitor, connections: *Connections, slot: usize, stream: Io.n
         log.debug("request failed: {t}", .{err});
 }
 
+/// The live traces; set once before the server starts.
+var tracer: *Tracer = undefined;
+
 /// Host names a writable instance answers to besides IP literals and
 /// `localhost` (`--allow-host`); set once before the server starts.
 var allowed_hosts: []const []const u8 = &.{};
@@ -275,6 +287,8 @@ fn route(monitor: *Monitor, req: *http.Server.Request, arena: std.mem.Allocator)
     const path = req.head.target[0 .. std.mem.findScalar(u8, req.head.target, '?') orelse req.head.target.len];
     if (!monitor.read_only and !hostAllowed(req))
         return sendError(req, .misdirected_request, "unknown host name; start the server with --allow-host NAME");
+
+    if (traceTarget(path)) |id| return routeTrace(monitor, req, id, arena);
 
     if (method == .GET or method == .HEAD) {
         if (std.mem.eql(u8, path, "/")) return send(req, .ok, "text/html; charset=utf-8", index_html);
@@ -342,6 +356,53 @@ fn route(monitor: *Monitor, req: *http.Server.Request, arena: std.mem.Allocator)
         }) catch |err| return sendMonitorError(req, err);
     } else return sendError(req, .method_not_allowed, "method not allowed");
     return send(req, .ok, "application/json", "{}");
+}
+
+/// The target id of `/api/targets/ID/trace`.
+fn traceTarget(path: []const u8) ?u32 {
+    const prefix = "/api/targets/";
+    const suffix = "/trace";
+    if (!std.mem.startsWith(u8, path, prefix) or !std.mem.endsWith(u8, path, suffix)) return null;
+    if (path.len < prefix.len + suffix.len) return null;
+    return std.fmt.parseInt(u32, path[prefix.len .. path.len - suffix.len], 10) catch null;
+}
+
+/// A live trace measures, it changes nothing: a read-only instance offers it
+/// too, bounded by the Tracer (sessions per target, a global cap, idle and
+/// age limits). GET reads it (and keeps it running), POST starts it, DELETE
+/// stops it.
+fn routeTrace(monitor: *Monitor, req: *http.Server.Request, id: u32, arena: std.mem.Allocator) !void {
+    switch (req.head.method) {
+        .GET => {
+            const body = try tracer.json(id, arena) orelse return sendError(req, .not_found, "no trace running");
+            return send(req, .ok, "application/json", body);
+        },
+        .POST => {
+            // The same CSRF guard as the other writes.
+            const content_type = req.head.content_type orelse "";
+            if (!std.mem.startsWith(u8, content_type, "application/json"))
+                return sendError(req, .unsupported_media_type, "send application/json");
+            var buf: [256]u8 = undefined;
+            const host = monitor.hostOf(id, &buf) orelse return sendError(req, .not_found, "no such target");
+            tracer.start(id, host) catch |err| return switch (err) {
+                error.TraceDisabled => sendError(req, .forbidden, "live traces are disabled on this server"),
+                error.TooManyTraces => sendError(req, .service_unavailable, "too many live traces running; try again in a minute"),
+                else => err,
+            };
+            return send(req, .accepted, "application/json", "{}");
+        },
+        .DELETE => {
+            tracer.stop(id);
+            return send(req, .ok, "application/json", "{}");
+        },
+        else => return sendError(req, .method_not_allowed, "method not allowed"),
+    }
+}
+
+test "trace route" {
+    try std.testing.expectEqual(@as(?u32, 7), traceTarget("/api/targets/7/trace"));
+    for ([_][]const u8{ "/api/targets/trace", "/api/targets//trace", "/api/targets/x/trace", "/api/targets/7/tracex", "/api/targets/7/8/trace", "/api/targets/7" }) |p|
+        try std.testing.expectEqual(@as(?u32, null), traceTarget(p));
 }
 
 fn readBody(req: *http.Server.Request, arena: std.mem.Allocator) ![]u8 {
@@ -442,4 +503,5 @@ fn sendMonitorError(req: *http.Server.Request, err: anyerror) !void {
 test {
     _ = @import("monitor.zig");
     _ = @import("demo.zig");
+    _ = @import("trace.zig");
 }
