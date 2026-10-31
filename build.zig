@@ -24,7 +24,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .strip = strip,
         .imports = &.{
+            .{ .name = "abuseguard", .module = zig_libs.module("abuseguard") },
             .{ .name = "dns", .module = zig_libs.module("dns") },
+            .{ .name = "http", .module = zig_libs.module("http") },
             .{ .name = "icmp", .module = zig_libs.module("icmp") },
             .{ .name = "netaddr", .module = zig_libs.module("netaddr") },
             .{ .name = "traceroute", .module = zig_libs.module("traceroute") },

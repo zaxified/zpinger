@@ -13,6 +13,8 @@
 const std = @import("std");
 const Io = std.Io;
 const icmp = @import("icmp");
+const dns = @import("dns");
+const gzip = @import("http").gzip;
 const demo = @import("demo.zig");
 
 const log = std.log.scoped(.monitor);
@@ -121,6 +123,15 @@ pub const Monitor = struct {
     version: u64 = 0,
     /// The last `state` result, shared by every viewer (holds one reference).
     snapshot: ?*Snapshot = null,
+    /// Files serialized under `mutex` but not written yet: `flushSaves`
+    /// writes them after `mutex` is released, so a slow disk (fsync) never
+    /// holds up the page or the probing loop.
+    pending_config: ?[]u8 = null,
+    pending_history: ?[]u8 = null,
+    /// Serializes `flushSaves`: files are written one at a time, each the
+    /// newest serialization when its turn came, so an older one never lands
+    /// over a newer one.
+    save_mutex: Io.Mutex = .init,
     /// For `health()`, read without the lock: when `loop` started, when the
     /// last cycle finished (0: none yet), and whether its probing worked.
     started_at: std.atomic.Value(i64) = .init(0),
@@ -131,6 +142,8 @@ pub const Monitor = struct {
         for (m.targets.items) |t| m.freeTarget(t);
         m.targets.deinit(m.gpa);
         if (m.snapshot) |snap| snap.release();
+        if (m.pending_config) |c| m.gpa.free(c);
+        if (m.pending_history) |h| m.gpa.free(h);
     }
 
     fn freeTarget(m: *Monitor, t: *Target) void {
@@ -165,6 +178,7 @@ pub const Monitor = struct {
         try validateName(name);
         try validateHost(host);
         try validateTags(tags);
+        defer m.flushSaves(); // after the unlock below
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
         const id = try m.addLocked(m.next_id, name, host, tags);
@@ -191,6 +205,7 @@ pub const Monitor = struct {
     }
 
     pub fn remove(m: *Monitor, id: u32) Error!void {
+        defer m.flushSaves(); // after the unlock below
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
         const i = m.find(id) orelse return error.UnknownTarget;
@@ -203,6 +218,7 @@ pub const Monitor = struct {
     pub fn setTags(m: *Monitor, id: u32, tags: []const []const u8) (Error || error{OutOfMemory})!void {
         try validateTags(tags);
         const copy = try dupeTags(m.gpa, tags);
+        defer m.flushSaves(); // after the unlock below
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
         const t = m.targets.items[
@@ -231,6 +247,7 @@ pub const Monitor = struct {
         errdefer if (name_copy) |n| m.gpa.free(n);
         const host_copy = if (host) |h| try m.gpa.dupe(u8, h) else null;
         errdefer if (host_copy) |h| m.gpa.free(h);
+        defer m.flushSaves(); // after the unlock below
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
         const t = m.targets.items[m.find(id) orelse return error.UnknownTarget];
@@ -261,6 +278,7 @@ pub const Monitor = struct {
     pub const Action = enum { pause, resume_, ack, unack };
 
     pub fn apply(m: *Monitor, id: u32, action: Action) Error!void {
+        defer m.flushSaves(); // after the unlock below
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
         const t = m.targets.items[m.find(id) orelse return error.UnknownTarget];
@@ -314,6 +332,7 @@ pub const Monitor = struct {
 
     /// One probing cycle. `t` is the cycle's start (unix seconds).
     pub fn runCycle(m: *Monitor, t: i64) void {
+        defer m.flushSaves(); // after every unlock below
         var arena_state: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -341,12 +360,7 @@ pub const Monitor = struct {
         }
 
         // 2. Resolve names (numeric addresses skip DNS).
-        for (jobs) |*job| {
-            job.addr = resolve(m.io, job.host) catch {
-                job.err = "name does not resolve";
-                continue;
-            };
-        }
+        resolveAll(m.io, m.gpa, jobs);
 
         // 3. Ping every resolved target in one paced round.
         if (probe(m.gpa, jobs)) {
@@ -493,8 +507,7 @@ pub const Monitor = struct {
             w.writeAll(" }") catch return;
         }
         w.writeAll("\n  ]\n}\n") catch return;
-        writeFileAtomic(m.io, m.config_path, aw.written()) catch |err|
-            log.err("cannot write {s}: {t}", .{ m.config_path, err });
+        replacePending(m.gpa, &m.pending_config, aw.toOwnedSlice() catch return);
     }
 
     /// History file: per target id, the non-empty samples as
@@ -526,14 +539,17 @@ pub const Monitor = struct {
         };
         defer parsed.deinit();
         if (parsed.value.cycle_s != m.cycle_s) return; // slots would not line up
-        const oldest = Io.Clock.real.now(m.io).toSeconds() - history_len * m.cycle_s;
+        const now = Io.Clock.real.now(m.io).toSeconds();
+        const oldest = now - history_len * m.cycle_s;
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
         for (parsed.value.targets) |entry| {
             const t = m.targets.items[m.find(entry.id) orelse continue];
             for (entry.samples) |s| {
                 if (s.len != 4 and s.len != 5) continue;
-                if (s[0] <= oldest) continue;
+                // From before the window, or from the future (a clock that
+                // was ahead): neither belongs in the series.
+                if (s[0] <= oldest or s[0] > now) continue;
                 const sample: Sample = .{
                     .t = s[0],
                     .sent = fileValue(u8, s[1], probes_per_cycle) orelse continue,
@@ -550,7 +566,7 @@ pub const Monitor = struct {
     }
 
     fn saveHistoryLocked(m: *Monitor) void {
-        const path = m.history_path orelse return;
+        if (m.history_path == null) return;
         var aw: Io.Writer.Allocating = .init(m.gpa);
         defer aw.deinit();
         const w = &aw.writer;
@@ -569,8 +585,38 @@ pub const Monitor = struct {
             w.writeAll("]}") catch return;
         }
         w.writeAll("]}\n") catch return;
-        writeFileAtomic(m.io, path, aw.written()) catch |err|
-            log.err("cannot write {s}: {t}", .{ path, err });
+        replacePending(m.gpa, &m.pending_history, aw.toOwnedSlice() catch return);
+    }
+
+    fn replacePending(gpa: std.mem.Allocator, slot_ptr: *?[]u8, data: []u8) void {
+        if (slot_ptr.*) |old| gpa.free(old);
+        slot_ptr.* = data;
+    }
+
+    /// Writes the files serialized since the last call. Call with `mutex`
+    /// NOT held: the write syncs to disk, which may take a while.
+    fn flushSaves(m: *Monitor) void {
+        m.save_mutex.lockUncancelable(m.io);
+        defer m.save_mutex.unlock(m.io);
+        const config, const history = blk: {
+            m.mutex.lockUncancelable(m.io);
+            defer m.mutex.unlock(m.io);
+            const taken = .{ m.pending_config, m.pending_history };
+            m.pending_config = null;
+            m.pending_history = null;
+            break :blk taken;
+        };
+        if (config) |data| {
+            defer m.gpa.free(data);
+            writeFileAtomic(m.io, m.config_path, data) catch |err|
+                log.err("cannot write {s}: {t}", .{ m.config_path, err });
+        }
+        if (history) |data| {
+            defer m.gpa.free(data);
+            const path = m.history_path.?;
+            writeFileAtomic(m.io, path, data) catch |err|
+                log.err("cannot write {s}: {t}", .{ path, err });
+        }
     }
 
     // ----- web API --------------------------------------------------------------
@@ -624,10 +670,28 @@ pub const Monitor = struct {
         refs: std.atomic.Value(u32) = .init(1),
         tag: StateTag,
         json: []u8,
+        /// `json` gzip-compressed, made by the first `gzipped` call.
+        gz: ?[]u8 = null,
+        gz_done: bool = false,
+        gz_mutex: Io.Mutex = .init,
+
+        /// `json` gzip-compressed: compressed by the first caller, shared
+        /// by the rest (who wait for it rather than compress it again).
+        /// Null if compressing failed (out of memory); send `json` then.
+        pub fn gzipped(snap: *Snapshot, io: Io) ?[]const u8 {
+            snap.gz_mutex.lockUncancelable(io);
+            defer snap.gz_mutex.unlock(io);
+            if (!snap.gz_done) {
+                snap.gz_done = true;
+                snap.gz = compress(snap.gpa, snap.json) catch null;
+            }
+            return snap.gz;
+        }
 
         pub fn release(snap: *Snapshot) void {
             if (snap.refs.fetchSub(1, .acq_rel) != 1) return;
             snap.gpa.free(snap.json);
+            if (snap.gz) |gz| snap.gpa.free(gz);
             snap.gpa.destroy(snap);
         }
     };
@@ -681,6 +745,19 @@ pub const Monitor = struct {
 };
 
 // ----- helpers ------------------------------------------------------------------
+
+/// `data` as one gzip member (level 6, zlib's default).
+fn compress(gpa: std.mem.Allocator, data: []const u8) ![]u8 {
+    // The deflate state is ~290 KiB: on the heap, and only while compressing.
+    const scratch = try gpa.create(gzip.Scratch);
+    defer gpa.destroy(scratch);
+    var out: Io.Writer.Allocating = try .initCapacity(gpa, data.len / 4 + 64);
+    errdefer out.deinit();
+    const w = try scratch.begin(&out.writer, 6);
+    try w.writeAll(data);
+    try scratch.finish();
+    return out.toOwnedSlice();
+}
 
 /// Milliseconds, two decimals below 10 ms (LAN targets) and one above.
 fn writeMs(w: *Io.Writer, us: u32) Io.Writer.Error!void {
@@ -788,24 +865,67 @@ fn writeFileAtomic(io: Io, path: []const u8, data: []const u8) !void {
     try file.replace(io);
 }
 
-/// First address of `host`; numeric addresses skip DNS.
-pub fn resolve(io: Io, host: []const u8) !icmp.Addr {
+/// Per-attempt budget of a name lookup. Explicit, so a lookup is bounded
+/// (2 families x 2 attempts x the servers) whatever resolv.conf says.
+const lookup_timeout_ms = 2000;
+/// Lookups running at once. With the DNS server down every lookup waits
+/// out its whole budget: one after another, 64 names took minutes.
+const max_lookups = 16;
+
+/// The preferred address of `host` (RFC 6724 order, like getaddrinfo);
+/// numeric addresses skip DNS.
+pub fn resolve(io: Io, gpa: std.mem.Allocator, host: []const u8) !icmp.Addr {
     if (icmp.Addr.parse(host)) |addr| return addr else |_| {}
-    const HostName = Io.net.HostName;
-    var buf: [16]HostName.LookupResult = undefined;
-    var queue: Io.Queue(HostName.LookupResult) = .init(&buf);
-    // lookup() blocks while the queue is full, so drain it concurrently.
-    var future = try io.concurrent(HostName.lookup, .{ try HostName.init(host), io, &queue, .{ .port = 0 } });
-    defer _ = future.cancel(io) catch {};
-    var found: ?icmp.Addr = null;
-    while (queue.getOne(io)) |result| switch (result) {
-        .address => |ip| {
-            if (found == null) found = icmp.Addr.fromIp(.fromStd(ip));
-        },
-        .canonical_name => {},
-    } else |_| {}
-    try future.await(io);
-    return found orelse error.UnknownHostName;
+    var resolver = dns.Resolver.init(io, gpa, .{ .timeout_ms = lookup_timeout_ms });
+    defer resolver.deinit();
+    return lookupFirst(&resolver, gpa, host);
+}
+
+fn lookupFirst(resolver: *dns.Resolver, gpa: std.mem.Allocator, host: []const u8) !icmp.Addr {
+    const ips = try resolver.lookupIp(host);
+    defer gpa.free(ips);
+    if (ips.len == 0) return error.UnknownHostName;
+    return icmp.Addr.fromIp(ips[0]);
+}
+
+/// Sets `addr` (or `err`) of every job, `max_lookups` lookups at a time.
+fn resolveAll(io: Io, gpa: std.mem.Allocator, jobs: []Job) void {
+    var next: std.atomic.Value(usize) = .init(0);
+    var group: Io.Group = .init;
+    for (0..@min(jobs.len, max_lookups)) |_| {
+        group.concurrent(io, resolveJobs, .{ io, gpa, jobs, &next }) catch break;
+    }
+    // Whatever no task took (no concurrency available) is resolved here.
+    resolveJobs(io, gpa, jobs, &next);
+    group.await(io) catch group.cancel(io);
+    // Canceled (at shutdown) before its lookup finished: say so, rather
+    // than record a cycle that sent nothing as if it had.
+    for (jobs) |*job| if (job.addr == null and job.err == null) {
+        job.err = "name lookup canceled";
+    };
+}
+
+/// Takes the next unresolved job until none is left. A lookup that does
+/// not finish (canceled at shutdown) leaves its job unresolved.
+fn resolveJobs(io: Io, gpa: std.mem.Allocator, jobs: []Job, next: *std.atomic.Value(usize)) void {
+    // One resolver per task: a `dns.Resolver` belongs to one thread.
+    var resolver: ?dns.Resolver = null;
+    defer if (resolver) |*r| r.deinit();
+    while (true) {
+        const i = next.fetchAdd(1, .monotonic);
+        if (i >= jobs.len) return;
+        const job = &jobs[i];
+        if (icmp.Addr.parse(job.host)) |addr| {
+            job.addr = addr;
+            continue;
+        } else |_| {}
+        if (resolver == null) resolver = dns.Resolver.init(io, gpa, .{ .timeout_ms = lookup_timeout_ms });
+        job.addr = lookupFirst(&resolver.?, gpa, job.host) catch |err| {
+            if (err == error.Canceled) return;
+            job.err = "name does not resolve";
+            continue;
+        };
+    }
 }
 
 /// One target's share of a cycle.
@@ -953,6 +1073,16 @@ test "the state is built once per change and shared" {
     // release frees it (the testing allocator reports a leak otherwise).
     try testing.expect(std.mem.find(u8, first.json, "\"paused\":false") != null);
     first.release();
+
+    // Compressed once, and it decompresses to the JSON.
+    const gz = second.gzipped(m.io).?;
+    try testing.expectEqual(gz.ptr, second.gzipped(m.io).?.ptr);
+    var in: Io.Reader = .fixed(gz);
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var dec: std.compress.flate.Decompress = .init(&in, .gzip, &window);
+    const plain = try dec.reader.allocRemaining(testing.allocator, .unlimited);
+    defer testing.allocator.free(plain);
+    try testing.expectEqualStrings(second.json, plain);
 }
 
 test "health: cycles must keep finishing and probing must work" {

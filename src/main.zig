@@ -8,7 +8,9 @@
 
 const std = @import("std");
 const Io = std.Io;
-const http = std.http;
+const http = @import("http");
+const abuseguard = @import("abuseguard");
+const Status = std.http.Status;
 const Monitor = @import("monitor.zig").Monitor;
 const StateTag = @import("monitor.zig").StateTag;
 const Tracer = @import("trace.zig").Tracer;
@@ -118,36 +120,47 @@ pub fn main(init: std.process.Init) !void {
     monitor.loadHistory() catch |err| fatal(io, "cannot load the history from {s}: {t} (move it away to start afresh)", .{ monitor.history_path.?, err });
 
     const address = Io.net.IpAddress.parseLiteral(listen_text) catch return fail(io, "bad --listen");
-    var server = listenExclusive(address) catch |err|
+    var admission: Admission = .{ .guard = .init(gpa, .{ .max_conns_per_ip = max_connections_per_ip }) };
+    defer admission.guard.deinit();
+    var server = http.Server.init(io, gpa, .{
+        .handler = handle,
+        .context = &monitor,
+        .on_connect = Admission.onConnect,
+        .on_connect_ctx = &admission,
+        .on_conn_state = Admission.onConnState,
+        .on_conn_state_ctx = &admission,
+        .on_error = logError,
+        .read_timeout_ms = 10_000,
+        // Also bounds the wait for a request, the first one included (an
+        // `idle_timeout_ms` would replace it there, on the first one too).
+        .request_timeout_ms = 10_000,
+        .write_timeout_ms = 10_000,
+        .response_timeout_ms = 30_000,
+        .max_header_bytes = 8 * 1024,
+        .max_body_bytes = max_body_bytes,
+        // With keep-alive the timeouts bound each request, not the
+        // connection: this bounds how long one connection keeps its thread.
+        .max_requests_per_conn = 100,
+        .server_name = null,
+        .error_headers = &security_headers,
+    });
+    defer server.deinit();
+    // zig-libs request: http — bind with SO_REUSEADDR but without
+    // SO_REUSEPORT (Go's default); `bind` offers neither or both. Until
+    // then the listener is bound here and handed to the server.
+    server.listener = listenExclusive(address) catch |err|
         fatal(io, "cannot listen on {s}: {t}", .{ listen_text, err });
-    defer server.deinit(io);
     log.info("zpinger {s} listening on http://{s} ({d} targets{s})", .{
         version, listen_text, monitor.targets.items.len, if (monitor.demo) ", demo" else if (monitor.read_only) ", read-only" else "",
     });
 
-    // The probing loop, the reaper and every connection run concurrently;
-    // with the default threaded Io each one is its own thread. Requests only
-    // read what the probing loop recorded: no viewer ever triggers a ping.
-    var connections: Connections = .{};
+    // The probing loop and every connection run concurrently; with the
+    // default threaded Io each one is its own thread. Requests only read
+    // what the probing loop recorded: no viewer ever triggers a ping.
     var tasks: Io.Group = .init;
     defer tasks.cancel(io);
     try tasks.concurrent(io, probeLoop, .{&monitor});
-    try tasks.concurrent(io, Connections.reap, .{ &connections, io });
-    while (true) {
-        const stream = server.accept(io) catch |err| {
-            // Out of descriptors or memory: wait for connections to close
-            // instead of spinning on the error.
-            log.warn("accept: {t}", .{err});
-            io.sleep(.fromMilliseconds(100), .awake) catch return;
-            continue;
-        };
-        const slot = connections.acquire(io, stream) orelse {
-            stream.close(io); // full: drop it rather than queue behind slow clients
-            continue;
-        };
-        tasks.concurrent(io, serve, .{ &monitor, &connections, slot, stream }) catch
-            connections.release(io, slot);
-    }
+    server.serve() catch |err| fatal(io, "serving failed: {t}", .{err});
 }
 
 /// A listening socket with SO_REUSEADDR only. std's `listen` sets
@@ -188,65 +201,60 @@ fn listenExclusive(address: Io.net.IpAddress) error{ AddressInUse, ListenFailed 
 }
 
 /// Limits for a server reachable from the internet. Every connection holds
-/// a thread, so connections are bounded twice: at most `max_connections` at
-/// once (more are closed unanswered), and each one is shut down
-/// `connection_deadline_s` after it was accepted, whatever the client does.
-/// Without the deadline a client that sends its request a byte at a time,
-/// or never, holds its thread forever. Per-client rate limits belong in the
-/// reverse proxy, which sees the client addresses.
+/// a thread, so at most `max_connections` are open at once, at most
+/// `max_connections_per_ip` from one client (an IPv6 /64), and more are
+/// closed unanswered. The server's timeouts bound how long each one lasts:
+/// a client that sends its request a byte at a time, or never, is cut off
+/// after 10 s. Per-client request rates belong in a reverse proxy.
 const max_connections = 256;
-const connection_deadline_s = 10;
+const max_connections_per_ip = 16;
+/// The largest request body: a target is a few hundred bytes of JSON.
+const max_body_bytes = 4096;
 
-const Connections = struct {
-    mutex: Io.Mutex = .init,
-    slots: [max_connections]Slot = @splat(.{}),
+/// Admission at accept time: the global cap here, the per-client cap in an
+/// `abuseguard.Guard`. A peer on loopback is the reverse proxy, carrying
+/// every client on one address: only the global cap applies to it.
+const Admission = struct {
+    guard: abuseguard.Guard,
+    open: std.atomic.Value(u32) = .init(0),
 
-    const Slot = struct { stream: ?Io.net.Stream = null, deadline: i64 = 0 };
-
-    fn now(io: Io) i64 {
-        return Io.Clock.awake.now(io).toSeconds();
-    }
-
-    /// A free slot, now holding `stream`; null when every slot is taken.
-    fn acquire(c: *Connections, io: Io, stream: Io.net.Stream) ?usize {
-        c.mutex.lockUncancelable(io);
-        defer c.mutex.unlock(io);
-        for (&c.slots, 0..) |*s, i| if (s.stream == null) {
-            s.* = .{ .stream = stream, .deadline = now(io) + connection_deadline_s };
-            return i;
-        };
-        return null;
-    }
-
-    /// Frees the slot and closes its stream. The slot is cleared first,
-    /// under the lock, so `reap` never shuts down a reused descriptor.
-    fn release(c: *Connections, io: Io, i: usize) void {
-        const stream = blk: {
-            c.mutex.lockUncancelable(io);
-            defer c.mutex.unlock(io);
-            const stream = c.slots[i].stream.?;
-            c.slots[i].stream = null;
-            break :blk stream;
-        };
-        stream.close(io);
-    }
-
-    /// Once a second, shuts down every connection past its deadline; the
-    /// thread serving it then reads end of stream (or fails to write) and
-    /// finishes.
-    fn reap(c: *Connections, io: Io) Io.Cancelable!void {
-        while (true) {
-            try io.sleep(.fromSeconds(1), .awake);
-            c.mutex.lockUncancelable(io);
-            defer c.mutex.unlock(io);
-            const t = now(io);
-            for (&c.slots) |*s| if (s.stream) |stream| if (t >= s.deadline) {
-                stream.shutdown(io, .both) catch {};
-                s.deadline = std.math.maxInt(i64);
-            };
+    fn onConnect(ctx: ?*anyopaque, peer: Io.net.IpAddress) http.Server.ConnDecision {
+        const a: *Admission = @ptrCast(@alignCast(ctx.?));
+        if (a.open.fetchAdd(1, .monotonic) >= max_connections) {
+            _ = a.open.fetchSub(1, .monotonic);
+            return .reject;
         }
+        const ip = ipOf(peer);
+        if (ip.isLoopback()) return .accept;
+        return switch (a.guard.admit(ip)) {
+            .admitted, .admitted_untracked => .accept,
+            else => {
+                _ = a.open.fetchSub(1, .monotonic);
+                return .reject;
+            },
+        };
+    }
+
+    /// Every admitted connection reports `.closed` exactly once.
+    fn onConnState(ctx: ?*anyopaque, peer: ?Io.net.IpAddress, state: http.Server.ConnState) void {
+        if (state != .closed) return;
+        const a: *Admission = @ptrCast(@alignCast(ctx.?));
+        _ = a.open.fetchSub(1, .monotonic);
+        const ip = ipOf(peer orelse return);
+        if (!ip.isLoopback()) a.guard.connClosed(ip);
     }
 };
+
+fn ipOf(address: Io.net.IpAddress) netaddr.Ip {
+    return switch (address) {
+        .ip4 => |a| .{ .v4 = a.bytes },
+        .ip6 => |a| .{ .v6 = a.bytes },
+    };
+}
+
+fn logError(_: ?*anyopaque, kind: http.Server.ErrorKind, err: ?anyerror, status: u16, _: ?Io.net.IpAddress) void {
+    if (err) |e| log.debug("{t}: {t} ({d})", .{ kind, e, status }) else log.debug("{t} ({d})", .{ kind, status });
+}
 
 fn fail(io: Io, msg: []const u8) noreturn {
     if (msg.len > 0) eprint(io, "zpinger: {s}\n", .{msg});
@@ -295,23 +303,15 @@ const security_headers = [_]http.Header{
     .{ .name = "referrer-policy", .value = "no-referrer" },
 };
 
-/// One request per connection: a slow or idle client then holds a thread
-/// only for one request, and the code stays simple. Put a reverse proxy in
-/// front for keep-alive and TLS.
-fn serve(monitor: *Monitor, connections: *Connections, slot: usize, stream: Io.net.Stream) void {
-    const io = monitor.io;
-    defer connections.release(io, slot);
-    var recv_buf: [8 * 1024]u8 = undefined;
-    var send_buf: [16 * 1024]u8 = undefined;
-    var reader = stream.reader(io, &recv_buf);
-    var writer = stream.writer(io, &send_buf);
-    var server: http.Server = .init(&reader.interface, &writer.interface);
-    var request = server.receiveHead() catch return;
+const Request = http.Server.Request;
+const ResponseWriter = http.Server.ResponseWriter;
 
+/// The server's handler; `Request.context` is the monitor.
+fn handle(req: *Request, rw: *ResponseWriter) anyerror!void {
+    const monitor: *Monitor = @ptrCast(@alignCast(req.context.?));
     var arena_state: std.heap.ArenaAllocator = .init(monitor.gpa);
     defer arena_state.deinit();
-    route(monitor, &request, stream.socket.address, arena_state.allocator()) catch |err|
-        log.debug("request failed: {t}", .{err});
+    return route(monitor, req, rw, arena_state.allocator());
 }
 
 /// The live traces; set once before the server starts.
@@ -328,12 +328,8 @@ var allowed_hosts: []const []const u8 = &.{};
 /// that cannot be rebound), `localhost` and the `--allow-host` names. A
 /// read-only instance changes nothing and shows only what it publishes, so
 /// it answers to any name and its proxy needs no configuration.
-fn hostAllowed(req: *const http.Server.Request) bool {
-    var headers = req.iterateHeaders();
-    while (headers.next()) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, "host")) return hostNameAllowed(h.value, allowed_hosts);
-    }
-    return false;
+fn hostAllowed(req: *const Request) bool {
+    return hostNameAllowed(req.header("host") orelse return false, allowed_hosts);
 }
 
 fn hostNameAllowed(host: []const u8, allowed: []const []const u8) bool {
@@ -353,80 +349,80 @@ test "writable instance: Host header guard" {
         try std.testing.expect(!hostNameAllowed(h, allowed));
 }
 
-fn route(monitor: *Monitor, req: *http.Server.Request, peer: Io.net.IpAddress, arena: std.mem.Allocator) !void {
-    const method = req.head.method;
-    const path = req.head.target[0 .. std.mem.findScalar(u8, req.head.target, '?') orelse req.head.target.len];
+fn route(monitor: *Monitor, req: *Request, rw: *ResponseWriter, arena: std.mem.Allocator) !void {
+    const method = req.method;
+    const path = req.path;
     if (!monitor.read_only and !hostAllowed(req))
-        return sendError(req, .misdirected_request, "unknown host name; start the server with --allow-host NAME");
+        return sendError(rw, .misdirected_request, "unknown host name; start the server with --allow-host NAME");
 
-    if (traceTarget(path)) |id| return routeTrace(monitor, req, id, viewerOf(req, peer), arena);
+    if (traceTarget(path)) |id| return routeTrace(monitor, req, rw, id, viewerOf(req), arena);
 
-    if (method == .GET or method == .HEAD) {
-        if (std.mem.eql(u8, path, "/")) return send(req, .ok, "text/html; charset=utf-8", index_html);
-        if (std.mem.eql(u8, path, "/app.js")) return send(req, .ok, "text/javascript", app_js);
-        if (std.mem.eql(u8, path, "/style.css")) return send(req, .ok, "text/css", style_css);
-        if (std.mem.eql(u8, path, "/favicon.svg")) return send(req, .ok, "image/svg+xml", favicon_svg);
-        if (std.mem.eql(u8, path, "/api/state")) return sendState(monitor, req, arena);
+    if (method == .get or method == .head) {
+        if (std.mem.eql(u8, path, "/")) return send(rw, .ok, "text/html; charset=utf-8", index_html);
+        if (std.mem.eql(u8, path, "/app.js")) return send(rw, .ok, "text/javascript", app_js);
+        if (std.mem.eql(u8, path, "/style.css")) return send(rw, .ok, "text/css", style_css);
+        if (std.mem.eql(u8, path, "/favicon.svg")) return send(rw, .ok, "image/svg+xml", favicon_svg);
+        if (std.mem.eql(u8, path, "/api/state")) return sendState(monitor, req, rw);
         if (std.mem.eql(u8, path, "/healthz")) {
             const h = monitor.health(Io.Clock.real.now(monitor.io).toSeconds());
-            return send(req, if (h.ok) .ok else .service_unavailable, "application/json", try arena.print(
+            return send(rw, if (h.ok) .ok else .service_unavailable, "application/json", try arena.print(
                 "{{\"ok\":{},\"probing_ok\":{},\"last_cycle\":{d},\"read_only\":{},\"demo\":{},\"version\":\"{s}\"}}",
                 .{ h.ok, h.probing_ok, h.last_cycle, monitor.read_only, monitor.demo, version },
             ));
         }
-        return sendError(req, .not_found, "not found");
+        return sendError(rw, .not_found, "not found");
     }
 
-    if (!std.mem.startsWith(u8, path, "/api/targets")) return sendError(req, .not_found, "not found");
-    if (monitor.read_only) return sendError(req, .forbidden, "this is a read-only demo");
+    if (!std.mem.startsWith(u8, path, "/api/targets")) return sendError(rw, .not_found, "not found");
+    if (monitor.read_only) return sendError(rw, .forbidden, "this is a read-only demo");
     // A cross-site form cannot send a JSON content type without a CORS
     // preflight, which this server never approves: a cheap CSRF guard.
-    const content_type = req.head.content_type orelse "";
+    const content_type = req.header("content-type") orelse "";
     if (!std.mem.startsWith(u8, content_type, "application/json"))
-        return sendError(req, .unsupported_media_type, "send application/json");
+        return sendError(rw, .unsupported_media_type, "send application/json");
 
     // POST /api/targets                {"name": ..., "host": ..., "tags": [...]}
-    if (method == .POST and std.mem.eql(u8, path, "/api/targets")) {
+    if (method == .post and std.mem.eql(u8, path, "/api/targets")) {
         const NewTarget = struct { name: []const u8, host: []const u8, tags: []const []const u8 = &.{} };
         const body = try readBody(req, arena);
         const parsed = std.json.parseFromSliceLeaky(NewTarget, arena, body, .{}) catch
-            return sendError(req, .bad_request, "expected {\"name\": ..., \"host\": ..., \"tags\": [...]}");
-        const id = monitor.add(parsed.name, parsed.host, parsed.tags) catch |err| return sendMonitorError(req, err);
-        return send(req, .created, "application/json", try arena.print("{{\"id\":{d}}}", .{id}));
+            return sendError(rw, .bad_request, "expected {\"name\": ..., \"host\": ..., \"tags\": [...]}");
+        const id = monitor.add(parsed.name, parsed.host, parsed.tags) catch |err| return sendMonitorError(rw, err);
+        return send(rw, .created, "application/json", try arena.print("{{\"id\":{d}}}", .{id}));
     }
 
     // DELETE /api/targets/ID, PATCH /api/targets/ID {"name": ..., "host": ..., "tags": [...]},
     // POST /api/targets/ID/{pause,resume,ack,unack},
     // POST /api/targets/ID/tags {"tags": [...]}
     var parts = std.mem.tokenizeScalar(u8, path["/api/targets".len..], '/');
-    const id = std.fmt.parseInt(u32, parts.next() orelse "", 10) catch return sendError(req, .not_found, "not found");
+    const id = std.fmt.parseInt(u32, parts.next() orelse "", 10) catch return sendError(rw, .not_found, "not found");
     const verb = parts.next();
-    if (parts.next() != null) return sendError(req, .not_found, "not found");
-    if (method == .DELETE and verb == null) {
-        monitor.remove(id) catch |err| return sendMonitorError(req, err);
-    } else if (method == .PATCH and verb == null) {
+    if (parts.next() != null) return sendError(rw, .not_found, "not found");
+    if (method == .delete and verb == null) {
+        monitor.remove(id) catch |err| return sendMonitorError(rw, err);
+    } else if (method == .patch and verb == null) {
         const Edit = struct { name: ?[]const u8 = null, host: ?[]const u8 = null, tags: ?[]const []const u8 = null };
         const body = try readBody(req, arena);
         const parsed = std.json.parseFromSliceLeaky(Edit, arena, body, .{}) catch
-            return sendError(req, .bad_request, "expected {\"name\": ..., \"host\": ..., \"tags\": [...]}");
-        monitor.edit(id, parsed.name, parsed.host, parsed.tags) catch |err| return sendMonitorError(req, err);
-    } else if (method == .POST and verb != null and std.mem.eql(u8, verb.?, "tags")) {
+            return sendError(rw, .bad_request, "expected {\"name\": ..., \"host\": ..., \"tags\": [...]}");
+        monitor.edit(id, parsed.name, parsed.host, parsed.tags) catch |err| return sendMonitorError(rw, err);
+    } else if (method == .post and verb != null and std.mem.eql(u8, verb.?, "tags")) {
         const Tags = struct { tags: []const []const u8 };
         const body = try readBody(req, arena);
         const parsed = std.json.parseFromSliceLeaky(Tags, arena, body, .{}) catch
-            return sendError(req, .bad_request, "expected {\"tags\": [...]}");
-        monitor.setTags(id, parsed.tags) catch |err| return sendMonitorError(req, err);
-    } else if (method == .POST and verb != null) {
+            return sendError(rw, .bad_request, "expected {\"tags\": [...]}");
+        monitor.setTags(id, parsed.tags) catch |err| return sendMonitorError(rw, err);
+    } else if (method == .post and verb != null) {
         const action = std.meta.stringToEnum(enum { pause, @"resume", ack, unack }, verb.?) orelse
-            return sendError(req, .not_found, "not found");
+            return sendError(rw, .not_found, "not found");
         monitor.apply(id, switch (action) {
             .pause => .pause,
             .@"resume" => .resume_,
             .ack => .ack,
             .unack => .unack,
-        }) catch |err| return sendMonitorError(req, err);
-    } else return sendError(req, .method_not_allowed, "method not allowed");
-    return send(req, .ok, "application/json", "{}");
+        }) catch |err| return sendMonitorError(rw, err);
+    } else return sendError(rw, .method_not_allowed, "method not allowed");
+    return send(rw, .ok, "application/json", "{}");
 }
 
 /// The target id of `/api/targets/ID/trace`.
@@ -446,11 +442,9 @@ var trust_proxy = true;
 /// proxy on loopback the last `X-Forwarded-For` entry, the one the proxy
 /// itself added (earlier ones come from the client and prove nothing). A
 /// peer outside loopback cannot get its header trusted.
-fn viewerOf(req: *const http.Server.Request, peer: Io.net.IpAddress) trace.Viewer {
-    const ip: netaddr.Ip = switch (peer) {
-        .ip4 => |a| .{ .v4 = a.bytes },
-        .ip6 => |a| .{ .v6 = a.bytes },
-    };
+fn viewerOf(req: *const Request) trace.Viewer {
+    // Served over a socket, a request always has its peer.
+    const ip = ipOf(req.peerAddress().?);
     if (trust_proxy and ip.isLoopback()) {
         var headers = req.iterateHeaders();
         var last: ?[]const u8 = null;
@@ -469,37 +463,37 @@ fn viewerOf(req: *const http.Server.Request, peer: Io.net.IpAddress) trace.Viewe
 /// too, bounded by the Tracer (one session per host, a global cap, a start
 /// rate, a per-viewer cap, idle and age limits). GET reads it (and keeps
 /// watching it), POST starts or joins it, DELETE stops watching it.
-fn routeTrace(monitor: *Monitor, req: *http.Server.Request, id: u32, viewer: trace.Viewer, arena: std.mem.Allocator) !void {
+fn routeTrace(monitor: *Monitor, req: *Request, rw: *ResponseWriter, id: u32, viewer: trace.Viewer, arena: std.mem.Allocator) !void {
     var buf: [256]u8 = undefined;
-    const host = monitor.hostOf(id, &buf) orelse return sendError(req, .not_found, "no such target");
-    switch (req.head.method) {
-        .GET => {
-            const found = tracer.json(host, viewer, arena) catch |err| return sendTraceError(req, err);
-            const body = found orelse return sendError(req, .not_found, "no trace running");
-            return send(req, .ok, "application/json", body);
+    const host = monitor.hostOf(id, &buf) orelse return sendError(rw, .not_found, "no such target");
+    switch (req.method) {
+        .get => {
+            const found = tracer.json(host, viewer, arena) catch |err| return sendTraceError(rw, err);
+            const body = found orelse return sendError(rw, .not_found, "no trace running");
+            return send(rw, .ok, "application/json", body);
         },
-        .POST => {
+        .post => {
             // The same CSRF guard as the other writes.
-            const content_type = req.head.content_type orelse "";
+            const content_type = req.header("content-type") orelse "";
             if (!std.mem.startsWith(u8, content_type, "application/json"))
-                return sendError(req, .unsupported_media_type, "send application/json");
-            tracer.start(host, viewer) catch |err| return sendTraceError(req, err);
-            return send(req, .accepted, "application/json", "{}");
+                return sendError(rw, .unsupported_media_type, "send application/json");
+            tracer.start(host, viewer) catch |err| return sendTraceError(rw, err);
+            return send(rw, .accepted, "application/json", "{}");
         },
-        .DELETE => {
+        .delete => {
             tracer.stop(host, viewer);
-            return send(req, .ok, "application/json", "{}");
+            return send(rw, .ok, "application/json", "{}");
         },
-        else => return sendError(req, .method_not_allowed, "method not allowed"),
+        else => return sendError(rw, .method_not_allowed, "method not allowed"),
     }
 }
 
-fn sendTraceError(req: *http.Server.Request, err: anyerror) !void {
+fn sendTraceError(rw: *ResponseWriter, err: anyerror) !void {
     return switch (err) {
-        error.TraceDisabled => sendError(req, .forbidden, "live traces are disabled on this server"),
-        error.TooManyTraces => sendError(req, .service_unavailable, "too many live traces running; try again in a minute"),
-        error.RateLimited => sendError(req, .too_many_requests, "too many live traces started in the last minute; try again shortly"),
-        error.ViewerLimit => sendError(req, .too_many_requests, std.fmt.comptimePrint("you are watching {d} live traces already; stop one first", .{trace.max_per_viewer})),
+        error.TraceDisabled => sendError(rw, .forbidden, "live traces are disabled on this server"),
+        error.TooManyTraces => sendError(rw, .service_unavailable, "too many live traces running; try again in a minute"),
+        error.RateLimited => sendError(rw, .too_many_requests, "too many live traces started in the last minute; try again shortly"),
+        error.ViewerLimit => sendError(rw, .too_many_requests, std.fmt.comptimePrint("you are watching {d} live traces already; stop one first", .{trace.max_per_viewer})),
         else => err,
     };
 }
@@ -516,21 +510,25 @@ test "trace viewer: X-Forwarded-For only from a loopback peer, last entry" {
     }) |c| {
         var raw_buf: [256]u8 = undefined;
         const raw = if (c.xff) |x|
-            try std.fmt.bufPrint(&raw_buf, "GET / HTTP/1.1\r\nX-Forwarded-For: {s}\r\n\r\n", .{x})
+            try std.fmt.bufPrint(&raw_buf, "GET / HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: {s}\r\n\r\n", .{x})
         else
-            "GET / HTTP/1.1\r\n\r\n";
-        var reader: Io.Reader = .fixed(raw);
-        var out: [64]u8 = undefined;
-        var writer: Io.Writer = .fixed(&out);
-        var server: http.Server = .init(&reader, &writer);
-        const req = try server.receiveHead();
+            "GET / HTTP/1.1\r\nHost: x\r\n\r\n";
         const peer: Io.net.IpAddress = switch (netaddr.parseIp(c.peer).?) {
             .v4 => |q| .{ .ip4 = .{ .bytes = q, .port = 40000 } },
             .v6 => |q| .{ .ip6 = .{ .bytes = q, .port = 40000 } },
         };
-        try std.testing.expectEqual(trace.viewerOf(netaddr.parseIp(c.want).?), viewerOf(&req, peer));
+        var rec = try http.httptest.record(std.testing.allocator, .{ .handler = ViewerProbe.handle, .peer = peer }, raw, .{});
+        defer rec.deinit();
+        try std.testing.expectEqual(trace.viewerOf(netaddr.parseIp(c.want).?), ViewerProbe.got);
     }
 }
+
+const ViewerProbe = struct {
+    var got: trace.Viewer = undefined;
+    fn handle(req: *Request, _: *ResponseWriter) anyerror!void {
+        got = viewerOf(req);
+    }
+};
 
 test "trace route" {
     try std.testing.expectEqual(@as(?u32, 7), traceTarget("/api/targets/7/trace"));
@@ -538,37 +536,43 @@ test "trace route" {
         try std.testing.expectEqual(@as(?u32, null), traceTarget(p));
 }
 
-fn readBody(req: *http.Server.Request, arena: std.mem.Allocator) ![]u8 {
-    var buf: [1024]u8 = undefined;
-    const reader = try req.readerExpectContinue(&buf);
-    return reader.allocRemaining(arena, .limited(4096));
+fn readBody(req: *Request, arena: std.mem.Allocator) ![]u8 {
+    return req.reader().allocRemaining(arena, .limited(max_body_bytes));
 }
 
 /// GET /api/state. The page polls more often than a cycle runs; the ETag
 /// lets a poll that finds nothing new end as `304 Not Modified`, no body.
-fn sendState(monitor: *Monitor, req: *http.Server.Request, arena: std.mem.Allocator) !void {
+/// The state compresses to a fifth with gzip: compressed once per state,
+/// not per request (see `Snapshot.gzipped`).
+fn sendState(monitor: *Monitor, req: *Request, rw: *ResponseWriter) !void {
     var buf: [64]u8 = undefined;
-    const current = etagOf(&buf, monitor.stateTag());
+    const accepts_gzip = http.gzip.acceptsGzip(req.header("accept-encoding"));
+    // A 304 names the representation this client gets.
+    const current = etagOf(&buf, monitor.stateTag(), accepts_gzip);
     if (ifNoneMatch(req, current))
-        return respond(req, "", .{ .status = .not_modified, .cache_control = "no-cache", .etag = current });
-    _ = arena;
+        return respond(rw, "", .{ .status = .not_modified, .cache_control = "no-cache", .etag = current, .vary = true });
     const state = try monitor.state();
     defer state.release();
-    return respond(req, state.json, .{
+    const gzip = if (accepts_gzip) state.gzipped(monitor.io) else null;
+    return respond(rw, gzip orelse state.json, .{
         .content_type = "application/json",
         .cache_control = "no-cache",
-        .etag = etagOf(&buf, state.tag),
+        .etag = etagOf(&buf, state.tag, gzip != null),
+        .gzip = gzip != null,
+        .vary = true,
     });
 }
 
-fn etagOf(buf: *[64]u8, tag: StateTag) []const u8 {
-    return std.mem.print(buf, "\"{d}-{d}\"", .{ tag.version, tag.end }) catch unreachable;
+/// `"version-end"`, `"version-end-gzip"` for the compressed body: a
+/// different representation needs a different ETag.
+fn etagOf(buf: *[64]u8, tag: StateTag, gzip: bool) []const u8 {
+    return std.mem.print(buf, "\"{d}-{d}{s}\"", .{ tag.version, tag.end, if (gzip) "-gzip" else "" }) catch unreachable;
 }
 
-/// Whether an If-None-Match header lists `etag`. Also accepted: the weak
-/// form and a suffix after the tag (`"1-2-gzip"`), as a compressing proxy
-/// may rewrite the ETag it passes on.
-fn ifNoneMatch(req: *const http.Server.Request, etag: []const u8) bool {
+/// Whether an If-None-Match header lists `etag` (a weak comparison, as
+/// RFC 9110 asks for it). Also accepted: a suffix after the tag
+/// (`"1-2-gzip"`), as a compressing proxy may rewrite the ETag it passes on.
+fn ifNoneMatch(req: *const Request, etag: []const u8) bool {
     const bare = etag[1 .. etag.len - 1];
     var headers = req.iterateHeaders();
     while (headers.next()) |h| {
@@ -584,55 +588,148 @@ fn ifNoneMatch(req: *const http.Server.Request, etag: []const u8) bool {
 }
 
 const Response = struct {
-    status: http.Status = .ok,
+    status: Status = .ok,
     content_type: ?[]const u8 = null,
     cache_control: []const u8 = "no-store",
     etag: ?[]const u8 = null,
+    /// The body is gzip-compressed.
+    gzip: bool = false,
+    /// The body depends on Accept-Encoding.
+    vary: bool = false,
 };
 
-fn respond(req: *http.Server.Request, body: []const u8, r: Response) !void {
-    var headers: [security_headers.len + 3]http.Header = undefined;
-    @memcpy(headers[0..security_headers.len], &security_headers);
-    var n: usize = security_headers.len;
-    headers[n] = .{ .name = "cache-control", .value = r.cache_control };
-    n += 1;
-    if (r.content_type) |v| {
-        headers[n] = .{ .name = "content-type", .value = v };
-        n += 1;
-    }
-    if (r.etag) |v| {
-        headers[n] = .{ .name = "etag", .value = v };
-        n += 1;
-    }
-    try req.respond(body, .{
-        .status = r.status,
-        .keep_alive = false,
-        // A 304 must not claim a content length of 0.
-        .transfer_encoding = if (r.status == .not_modified) .none else null,
-        .extra_headers = headers[0..n],
-    });
+fn respond(rw: *ResponseWriter, body: []const u8, r: Response) !void {
+    rw.setStatus(@backingInt(r.status));
+    for (security_headers) |h| try rw.setHeader(h.name, h.value);
+    try rw.setHeader("cache-control", r.cache_control);
+    if (r.content_type) |v| try rw.setHeader("content-type", v);
+    if (r.etag) |v| try rw.setHeader("etag", v);
+    if (r.gzip) try rw.setHeader("content-encoding", "gzip");
+    if (r.vary) try rw.setHeader("vary", "accept-encoding");
+    // A 304 has no body and must not claim a length of 0.
+    if (r.status == .not_modified) return;
+    // An exact length rather than chunked framing past the response buffer.
+    var len: [20]u8 = undefined;
+    try rw.setHeader("content-length", std.mem.print(&len, "{d}", .{body.len}) catch unreachable);
+    try rw.writeAll(body);
 }
 
-fn send(req: *http.Server.Request, status: http.Status, content_type: []const u8, body: []const u8) !void {
-    return respond(req, body, .{ .status = status, .content_type = content_type });
+fn send(rw: *ResponseWriter, status: Status, content_type: []const u8, body: []const u8) !void {
+    return respond(rw, body, .{ .status = status, .content_type = content_type });
 }
 
-fn sendError(req: *http.Server.Request, status: http.Status, msg: []const u8) !void {
+fn sendError(rw: *ResponseWriter, status: Status, msg: []const u8) !void {
     var buf: [256]u8 = undefined;
     const body = std.mem.print(&buf, "{{\"error\":{f}}}", .{std.json.fmt(msg, .{})}) catch unreachable;
-    return send(req, status, "application/json", body);
+    return send(rw, status, "application/json", body);
 }
 
-fn sendMonitorError(req: *http.Server.Request, err: anyerror) !void {
+fn sendMonitorError(rw: *ResponseWriter, err: anyerror) !void {
     return switch (err) {
-        error.UnknownTarget => sendError(req, .not_found, "no such target"),
-        error.InvalidName => sendError(req, .bad_request, "name: 1-64 printable characters"),
-        error.InvalidHost => sendError(req, .bad_request, "host: an IP address or a DNS name"),
-        error.InvalidTags => sendError(req, .bad_request, "tags: at most 8, each 1-32 characters, no spaces or commas"),
-        error.TooManyTargets => sendError(req, .conflict, "too many targets"),
-        error.NotDown => sendError(req, .conflict, "only a DOWN target can be acknowledged"),
+        error.UnknownTarget => sendError(rw, .not_found, "no such target"),
+        error.InvalidName => sendError(rw, .bad_request, "name: 1-64 printable characters"),
+        error.InvalidHost => sendError(rw, .bad_request, "host: an IP address or a DNS name"),
+        error.InvalidTags => sendError(rw, .bad_request, "tags: at most 8, each 1-32 characters, no spaces or commas"),
+        error.TooManyTargets => sendError(rw, .conflict, "too many targets"),
+        error.NotDown => sendError(rw, .conflict, "only a DOWN target can be acknowledged"),
         else => err,
     };
+}
+
+/// One request through the real handler, as a client sees the answer.
+fn testRequest(monitor: *Monitor, wire: []const u8) !http.httptest.Recording {
+    return http.httptest.record(std.testing.allocator, .{
+        .handler = handle,
+        .context = monitor,
+        .max_body_bytes = max_body_bytes,
+        .server_name = null,
+        .error_headers = &security_headers,
+    }, wire, .{});
+}
+
+test "routes: pages, HEAD, state with ETag and gzip, read-only, Host guard, body cap" {
+    const testing = std.testing;
+    var m: Monitor = .{ .gpa = testing.allocator, .io = testing.io, .config_path = "unused", .read_only = true };
+    defer m.deinit();
+    m.cycle_s = 1 << 30; // no new cycle (a new ETag) during the test
+    _ = try m.add("a", "192.0.2.1", &.{}); // read-only: never saved
+
+    {
+        var rec = try testRequest(&m, "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+        defer rec.deinit();
+        const r = try rec.only();
+        try testing.expectEqual(200, r.status);
+        try testing.expectEqualStrings(index_html, r.body);
+        try testing.expectEqualStrings("nosniff", r.header("x-content-type-options").?);
+        try testing.expect(r.header("transfer-encoding") == null);
+    }
+    {
+        var rec = try testRequest(&m, "HEAD /app.js HTTP/1.1\r\nHost: x\r\n\r\n");
+        defer rec.deinit();
+        const r = try rec.only();
+        try testing.expectEqual(200, r.status);
+        try testing.expectEqual(0, r.body.len);
+    }
+    var etag_buf: [64]u8 = undefined;
+    const etag = blk: {
+        var rec = try testRequest(&m, "GET /api/state HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip, br\r\n\r\n");
+        defer rec.deinit();
+        const r = try rec.only();
+        try testing.expectEqual(200, r.status);
+        try testing.expectEqualStrings("gzip", r.header("content-encoding").?);
+        try testing.expectEqualStrings("accept-encoding", r.header("vary").?);
+        try testing.expect(std.mem.endsWith(u8, r.header("etag").?, "-gzip\""));
+        const e = r.header("etag").?;
+        @memcpy(etag_buf[0..e.len], e);
+        break :blk etag_buf[0..e.len];
+    };
+    {
+        var rec = try testRequest(&m, "GET /api/state HTTP/1.1\r\nHost: x\r\n\r\n");
+        defer rec.deinit();
+        const r = try rec.only();
+        try testing.expect(r.header("content-encoding") == null);
+        try testing.expect(std.mem.startsWith(u8, r.body, "{\"read_only\":true"));
+    }
+    {
+        var wire: [256]u8 = undefined;
+        var rec = try testRequest(&m, try std.mem.print(&wire, "GET /api/state HTTP/1.1\r\nHost: x\r\nIf-None-Match: {s}\r\n\r\n", .{etag}));
+        defer rec.deinit();
+        const r = try rec.only();
+        try testing.expectEqual(304, r.status);
+        try testing.expect(r.header("content-length") == null);
+    }
+    {
+        var rec = try testRequest(&m, "POST /api/targets HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}");
+        defer rec.deinit();
+        try testing.expectEqual(403, (try rec.only()).status);
+    }
+    {
+        var rec = try testRequest(&m, "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n");
+        defer rec.deinit();
+        try testing.expectEqual(404, (try rec.only()).status);
+    }
+
+    // A writable instance: the Host guard, the body cap, the CSRF guard
+    // (each refuses before anything is changed or saved).
+    m.read_only = false;
+    defer m.read_only = true;
+    {
+        var rec = try testRequest(&m, "GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+        defer rec.deinit();
+        try testing.expectEqual(421, (try rec.only()).status);
+    }
+    {
+        var rec = try testRequest(&m, "POST /api/targets HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 5000\r\n\r\n");
+        defer rec.deinit();
+        const r = try rec.only();
+        try testing.expectEqual(413, r.status);
+        try testing.expectEqualStrings("nosniff", r.header("x-content-type-options").?);
+    }
+    {
+        var rec = try testRequest(&m, "POST /api/targets/1/pause HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n");
+        defer rec.deinit();
+        try testing.expectEqual(415, (try rec.only()).status);
+    }
 }
 
 test {

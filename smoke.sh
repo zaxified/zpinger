@@ -12,7 +12,7 @@ set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 BIN=$(realpath "${1:-$HERE/zig-out/bin/zpinger}")
 NETNS_RUN="$HERE/scripts/netns-run"
-if [ -z "${ZFPING_NETNS:-}" ] && [ -x "$NETNS_RUN" ]; then
+if [ -z "${ZPINGER_NETNS:-}" ] && [ -x "$NETNS_RUN" ]; then
     exec "$NETNS_RUN" sh "$0" "$BIN"
 fi
 
@@ -68,8 +68,8 @@ host() { curl -s -o /dev/null -w '%{http_code}' -H "host: $1" "$URL/api/state"; 
 [ "$(host evil.example)" = 421 ] || fail "writable instance answers to any Host"
 [ "$(host localhost:$PORT)" = 200 ] || fail "writable instance refuses localhost"
 curl -sI "$URL/" | grep -qi '^content-security-policy:' || fail "no CSP header"
-# A client that connects and sends nothing is cut off at the connection
-# deadline (10 s); checked at the end, it runs while the cycle completes.
+# A client that connects and sends nothing is cut off by the read timeout
+# (10 s); checked at the end, it runs while the cycle completes.
 date +%s > idle.start
 (timeout 20 nc -d 127.0.0.1 $PORT >/dev/null 2>&1; date +%s > idle.end) &
 IDLE=$!

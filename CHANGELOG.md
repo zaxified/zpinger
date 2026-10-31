@@ -6,6 +6,23 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
+- **HTTP on zig-libs `http.Server`** instead of std's: keep-alive (a page
+  polling a live trace every second reuses its connection), server
+  timeouts per request (10 s to send it, 10 s of silence, 30 s to read the
+  answer) in place of one fixed 10 s per connection, request bodies capped
+  at 4 KiB before the handler runs (`413`), and at most 16 connections per
+  client address (zig-libs `abuseguard`; a proxy on loopback is exempt) next
+  to the 256 overall. `/api/state` goes out gzip-compressed (a fifth of the
+  size) to clients that accept it, compressed once per state, with its own
+  ETag (`"…-gzip"`) and `Vary: Accept-Encoding`.
+- **Names resolve 16 at a time** (zig-libs `dns.Resolver`, 2 s per attempt):
+  with a dead DNS server a cycle no longer takes minutes. The address used is
+  the preferred one in RFC 6724 order, for the cycle and the live trace alike.
+- **Saving no longer holds up the page:** the target list and the history
+  are serialized under the monitor's lock but written (and synced to disk)
+  after it is released, one file at a time, newest wins. A history entry
+  from the future (a clock that was ahead) is dropped on load.
+- `ZFPING_NETNS` is now `ZPINGER_NETNS` (scripts/netns-run, smoke.sh).
 - **Robustness (independent review):** stopping a trace no longer waits,
   under the tracer's lock, for a session stuck in a slow DNS lookup (every
   trace request used to stall for the resolver timeout); a viewer refused

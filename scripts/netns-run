@@ -20,7 +20,7 @@
 #      with every capability and send them down privileged (SOCK_RAW) paths
 #      they never take for an ordinary user.
 #
-# CMD sees ZFPING_NETNS=1: loopback and DGRAM ICMP sockets are guaranteed, so
+# CMD sees ZPINGER_NETNS=1: loopback and DGRAM ICMP sockets are guaranteed, so
 # the live-socket tests run here instead of skipping (scripts/test.sh fails on
 # any unexpected skip).
 #
@@ -55,5 +55,5 @@ exec unshare --user --map-root-user --net -- /bin/sh -c '
     ip -o link show lo | grep -q "LOWER_UP" || { echo "netns-run: lo did not come up" >&2; exit 97; }
     echo "0 0" > /proc/sys/net/ipv4/ping_group_range
     uid=$1; gid=$2; shift 2
-    exec unshare --user --map-user="$uid" --map-group="$gid" -- env ZFPING_NETNS=1 "$@"
+    exec unshare --user --map-user="$uid" --map-group="$gid" -- env ZPINGER_NETNS=1 "$@"
 ' netns-run "$uid" "$gid" "$@"

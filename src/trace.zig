@@ -522,10 +522,7 @@ const Session = struct {
         defer if (names) |*f| f.cancel(io);
         const reason = s.trace() catch |err| blk: {
             log.info("trace of {s} failed: {t}", .{ s.host, err });
-            break :blk switch (err) {
-                error.UnknownHostName => Reason.unresolved,
-                else => Reason.failed,
-            };
+            break :blk Reason.failed;
         };
         s.mutex.lockUncancelable(io);
         s.reason = reason;
@@ -537,7 +534,12 @@ const Session = struct {
     /// until the session ends (the engine fills the snapshot).
     fn trace(s: *Session) !Reason {
         const io = s.tracer.io;
-        const dest = (try resolve(io, s.host)).toIp();
+        // No address or no answer from DNS: either way, nothing to trace.
+        const addr = resolve(io, s.tracer.gpa, s.host) catch |err| switch (err) {
+            error.Canceled, error.OutOfMemory => |e| return e,
+            else => return .unresolved,
+        };
+        const dest = addr.toIp();
         s.mutex.lockUncancelable(io);
         s.address = dest;
         s.mutex.unlock(io);

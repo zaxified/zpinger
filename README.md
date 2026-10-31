@@ -209,15 +209,15 @@ Not there yet; know them before you expose it:
 - **No authentication.** Without `--read-only`, anyone who reaches the port can
   change the targets. The default address is loopback; the public instance runs
   read-only.
-- **Names resolve one after another**, each with the resolver's own timeout
-  (5 s, 2 attempts). With a dead DNS server and many names a cycle gets
-  longer, and `/healthz` reports 503 once cycles are 3 minutes apart;
-  numeric addresses never wait.
-- **One request per connection, no TLS.** Each connection is served on its own
-  thread and closed after one response. A reverse proxy in front provides
-  keep-alive, TLS and compression, and the host's protection (CrowdSec,
-  fail2ban) per-client limits.
-- **At most 64 targets**, one address per name (the first one DNS returns).
+- **Names resolve 16 at a time**, each lookup bounded (2 s per attempt, 2
+  attempts, A and AAAA): with a dead DNS server a cycle takes some 10 s
+  longer, not minutes; numeric addresses never wait. A name that does not
+  resolve shows its target DOWN ("name does not resolve").
+- **No TLS.** HTTP/1.1 with keep-alive, each connection on its own thread. A
+  reverse proxy in front provides TLS, and the host's protection (CrowdSec,
+  fail2ban) per-client request limits.
+- **At most 64 targets**, one address per name (the preferred one, in
+  getaddrinfo's RFC 6724 order).
 - History is saved as JSON after every cycle (about 400 KB for 10 targets).
 
 ## Many viewers, and the open internet
@@ -230,15 +230,21 @@ starts, but only to a listed target and within the server's bounds
 - **One serialization per change.** The state JSON is built once per cycle
   (or target change) and served to every viewer from a cache. The page polls
   every 15 s with `If-None-Match`, so most polls are a body-less `304`; a
-  background tab does not poll at all. Measured with 64 targets (a 930 KB
-  state): 50 concurrent clients, 2000 full responses in 3.4 s, 12 threads,
-  7 MB RSS.
-- **Bounded connections.** At most 256 at once (more are closed unanswered),
-  each shut down 10 s after it was accepted, so a client that never finishes
-  its request cannot hold a thread for longer. A flood of idle connections
-  still fills the 256 slots for as long as it lasts; the proxy, which
-  waits for a complete request before it connects here, and per-client
-  limits in front of it are the answer to that.
+  background tab does not poll at all. Measured with 64 targets (a 1.1 MB
+  state): 200 concurrent clients fetching it for 10 s, 10 660 full
+  responses, 99 threads, 34 MB RSS; idle 11 MB.
+- **Bounded connections.** At most 256 at once and 16 from one client
+  address (an IPv6 /64); more are closed unanswered. A reverse proxy on
+  loopback carries every client on one address, so only the 256 apply to it;
+  a proxy on another address (a container bridge, another host) counts as
+  one client, and its X-Forwarded-For is not trusted either.
+  A request must arrive whole within 10 s of its first byte, a connection
+  that sends nothing (or nothing more) is closed after 10 s, and a response
+  must be read within 30 s, so a client that never finishes cannot hold a
+  thread for longer (250 such connections: 84 MB, all closed on time). A
+  flood of them still fills the slots while it lasts; the proxy, which waits
+  for a complete request before it connects here, and per-client limits in
+  front of it are the answer to that.
 - **Nothing to change, nothing to read.** `--read-only` refuses every write
   in the server, not just in the page; the routes are a fixed list (no file
   serving, no path handling); every string reaches the page through
@@ -260,7 +266,9 @@ Everything in `targets.json` (names *and* host addresses) is public on a
 read-only instance; list only targets you are happy to show.
 
 The state is about 15 KB per target, a long run of small numbers that
-compresses well: enable compression in the proxy (`encode` below).
+compresses well: the server sends it gzip-compressed (about a fifth of the
+size) to every client that accepts gzip, compressed once per change, not per
+request. Enable compression in the proxy (`encode` below) for the page itself.
 
 ## Deploying
 
