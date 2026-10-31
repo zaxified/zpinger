@@ -1,4 +1,4 @@
-Oct 31 11:00:00 host zpinger[1234]: event: event=start version=1.0.0 listen=127.0.0.1:18096 targets=2 mode=writable trust_proxy=true allow_host=0 trace_max=1 access_log=refused dns_stale=86400
+Oct 31 11:00:00 host zpinger[1234]: event: event=start version=0.2.0 listen=127.0.0.1:18096 targets=2 mode=writable trust_proxy=true allow_host=0 trace_max=1 access_log=refused dns_stale=86400
 Oct 31 11:01:00 host zpinger[1234]: event: event=http client=127.0.0.1 status=404 reason=not_found method="GET" path="/../../etc/passwd" ms=0 bytes=21 ua="sqlmap/1.7 \"x\""
 Oct 31 11:02:00 host zpinger[1234]: event: event=http client=127.0.0.1 status=421 reason=host_not_allowed method="GET" path="/" ms=0 bytes=70 ua="curl/8.18.0" host="rebind.attacker.example"
 Oct 31 11:03:00 host zpinger[1234]: event: event=http client=127.0.0.1 status=415 reason=not_json method="POST" path="/api/targets/1/pause" ms=0 bytes=33 ua="curl/8.18.0"

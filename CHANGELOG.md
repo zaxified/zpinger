@@ -1,15 +1,13 @@
 # Changelog
 
-Until 1.0.0 this application lived in the zig-fping repository as
+This application started in the zig-fping repository as
 `example-apps/fping-watch`; its history was carried over (`git filter-repo`),
 and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased (0.2.0)
 
-- **Versioning starts again at 0.2.** 1.0.0 was fping-watch, an example
-  application inside zig-fping; as a project of its own zpinger is not at
-  1.0 yet. The package is a different one (`zpinger`, conflicting with
-  `fping-watch`), so no upgrade path goes backwards.
+- **The first release as zpinger**, formerly fping-watch in zig-fping. The
+  package is a new one (`zpinger`, conflicting with `fping-watch`).
 - **Every deadline is reported:** a connection a timeout cut off is
   `event=conn action=closed reason=timeout` with `requests`, `ms` and the
   `phase` it stalled in (`no_request`, `head`, `body`, `write`,
@@ -137,7 +135,7 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 - **Jitter** per cycle (mean step between consecutive replies' round-trip
   times): a `jitter` series in `/api/state`, a ± jitter band in the chart,
-  24 h jitter and 95th percentile in the stats. History files from 1.0.0
+  24 h jitter and 95th percentile in the stats. History files from fping-watch
   still load.
 - **Read-only shows every control**; using one explains that it is a demo
   (the server still answers 403). Every button explains itself on hover.
@@ -162,7 +160,7 @@ and these entries come from zig-fping's CHANGELOG.md.
   the add form, and next to the tags in the row): every tag in use with a
   tick, a filter that also creates a new tag. An IP address ticks `ipv4` or
   `ipv6` for a new target (untick it to keep it off); saved in `targets.json`
-  (`"tags": [...]`, optional, files from 1.0.0 load unchanged), served in
+  (`"tags": [...]`, optional, files from fping-watch load unchanged), served in
   `/api/state`, changed with `POST /api/targets/ID/tags`. The demo targets
   carry tags.
 - **Filter, find and order** above the list: tag chips (a target must have
@@ -198,7 +196,7 @@ and these entries come from zig-fping's CHANGELOG.md.
   re-renders, and a re-render (also the one after each cycle) keeps the
   scroll position, with expanded details filled in before the next paint.
 
-## 1.0.0 — a finished application, shipped as a Debian package (2026-10-28, in zig-fping v0.2.1)
+## fping-watch — a finished application, shipped as a Debian package (2026-10-28, in zig-fping v0.2.1)
 
 The example application is no longer a proof of concept: it is finished for
 its purpose (the library's example, a ping monitor to run for yourself, and
@@ -255,7 +253,7 @@ targets and a real time-series store are out of its scope.
   unbounded, and when no thread could be started the accept loop served the
   connection itself, so one idle client stopped the server.
 
-## Proof of concept (2026-10-18, in zig-fping v0.2.0)
+## fping-watch — proof of concept (2026-10-18, in zig-fping v0.2.0)
 
 `example-apps/fping-watch` (proof of concept): a ping monitor daemon on top
 of the library. It probes a JSON list of targets once a minute in one paced

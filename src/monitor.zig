@@ -535,7 +535,7 @@ pub const Monitor = struct {
     // ----- persistence ----------------------------------------------------------
 
     /// The on-disk target list. Hand-written files may omit everything but
-    /// `name` and `host`; a file from 1.0.0 has no `tags`.
+    /// `name` and `host`; a file from fping-watch has no `tags`.
     const ConfigFile = struct {
         targets: []const struct {
             id: u32 = 0,
@@ -593,7 +593,7 @@ pub const Monitor = struct {
     }
 
     /// History file: per target id, the non-empty samples as
-    /// `[t, sent, recv, rtt_us, jitter_us]`; files from 1.0.0 lack `jitter_us`.
+    /// `[t, sent, recv, rtt_us, jitter_us]`; files from fping-watch lack `jitter_us`.
     const HistoryFile = struct {
         cycle_s: i64,
         targets: []const struct { id: u32, samples: []const []const i64 },
@@ -1312,7 +1312,7 @@ test "persistence: missing target list, unusable history, atomic writes" {
     try m.loadHistory();
     const target = m.targets.items[0];
     try testing.expectEqual(0, target.history[m.slot(t - 180)].t);
-    // A 1.0.0 sample (no jitter) and a current one load; a short one does not.
+    // An fping-watch sample (no jitter) and a current one load; a short one does not.
     try testing.expectEqual(4, target.history[m.slot(t - 120)].recv);
     try testing.expectEqual(0, target.history[m.slot(t - 120)].jitter_us);
     try testing.expectEqual(70, target.history[m.slot(t - 60)].jitter_us);

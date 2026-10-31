@@ -51,8 +51,7 @@ handful of targets once a minute and serves a web page with the last 24 hours.
 Writable is the default: you run it for yourself, on loopback. The public
 demo is the same package with one setting changed ([Deploying](#deploying)).
 
-It started as zig-fping's example application (`fping-watch`, up to 1.0.0)
-and is kept small enough to read in one sitting:
+It started as `fping-watch`, zig-fping's example application, and is kept small enough to read in one sitting:
 `src/monitor.zig` (targets, probing, history, persistence), `src/main.zig`
 (HTTP server and API), `src/web/` (the page; no framework and no build step,
 embedded into the binary). Nothing beyond Zig's standard library and
@@ -376,8 +375,7 @@ Upgrades restart the service (and leave it alone if you disabled it).
 `apt remove` keeps the settings, the list and the history; `apt purge`
 deletes them.
 
-zpinger was called `fping-watch` up to 1.0.0 (released inside zig-fping);
-as its own project it starts again at 0.2. The package conflicts with the
+zpinger was called `fping-watch` while it lived in zig-fping. The package conflicts with the
 old `fping-watch` package (same default port); its `/etc/fping-watch/env`
 and `/var/lib/fping-watch/` are not carried over (variables are now
 `ZPINGER_*`).

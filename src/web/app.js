@@ -8,7 +8,7 @@ let state = null;
 
 // What the list shows, kept in the URL fragment so a filtered view can be
 // bookmarked or sent: #open=3,5&tags=dns,ipv6&q=google&sort=loss&rev=1.
-// The 1.0 form, #3,5, still opens targets 3 and 5.
+// fping-watch's form, #3,5, still opens targets 3 and 5.
 // The status pills, which filter the list too: health over the last hour
 // (see healthOf), then the status now.
 const PILLS = {
