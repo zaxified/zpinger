@@ -3,7 +3,7 @@
 A small ping monitor built on [zig-libs](https://github.com/zaxified/zig-libs): a daemon that pings a
 handful of targets once a minute and serves a web page with the last 24 hours.
 
-![zpinger: eleven targets with status, recent cycles and uptime; one row expanded to its 24-hour latency chart](doc/screenshot.png)
+![zpinger: eight hosts with status, tags, recent cycles and uptime; one row expanded to its 24-hour latency chart and a live trace of the route, hop by hop](doc/screenshot.png)
 
 <sub>Sample data: one target paused, one acknowledged, one row expanded.</sub>
 

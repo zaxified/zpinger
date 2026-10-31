@@ -6,6 +6,10 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
+- **Trace hops named by reverse DNS** (PTR through the system resolver,
+  one lookup at a time beside the trace, never delaying a round); the page
+  shows "name (address)", the trace JSON gains `names`. `--trace-names off`
+  shows addresses only. zig-libs `dns`, built without DoH.
 - **Live trace** in the target detail, mtr style: one probe to every hop each
   second, per hop loss, last/average/best/worst latency, jitter and a
   sparkline of the last 60 rounds. Unprivileged (a ping socket), offered
