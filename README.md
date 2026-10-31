@@ -190,8 +190,10 @@ Not there yet; know them before you expose it:
 
 ## Many viewers, and the open internet
 
-Viewers only read: probing runs on its own schedule, and no request ever
-sends a ping, however many people have the page open.
+Viewers only read: probing runs on its own schedule, however many people
+have the page open. The one exception is a live trace, which a viewer
+starts, but only to a listed target and within the server's bounds
+([Live trace](#live-trace)).
 
 - **One serialization per change.** The state JSON is built once per cycle
   (or target change) and served to every viewer from a cache. The page polls
