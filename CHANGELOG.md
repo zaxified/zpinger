@@ -129,8 +129,7 @@ and these entries come from zig-fping's CHANGELOG.md.
   `/etc/zpinger/env`, `/var/lib/zpinger/` and the `ZPINGER_*` variables
   replace their `fping-watch` names; the package conflicts with
   `fping-watch` and carries nothing over from it.
-- **Own repository.** zig-fping is now a package dependency pinned to the
-  `v0.2.1` tag (by URL and hash) instead of the parent checkout;
+- **Own repository**, split out of zig-fping with its history;
   `scripts/netns-run` and `scripts/zig-env.sh` are copied from zig-fping.
 
 - **Jitter** per cycle (mean step between consecutive replies' round-trip
@@ -196,7 +195,7 @@ and these entries come from zig-fping's CHANGELOG.md.
   re-renders, and a re-render (also the one after each cycle) keeps the
   scroll position, with expanded details filled in before the next paint.
 
-## fping-watch — a finished application, shipped as a Debian package (2026-10-28, in zig-fping v0.2.1)
+## fping-watch — a finished application, shipped as a Debian package (2026-10-28)
 
 The example application is no longer a proof of concept: it is finished for
 its purpose (the library's example, a ping monitor to run for yourself, and
@@ -253,7 +252,7 @@ targets and a real time-series store are out of its scope.
   unbounded, and when no thread could be started the accept loop served the
   connection itself, so one idle client stopped the server.
 
-## fping-watch — proof of concept (2026-10-18, in zig-fping v0.2.0)
+## fping-watch — proof of concept (2026-10-18)
 
 `example-apps/fping-watch` (proof of concept): a ping monitor daemon on top
 of the library. It probes a JSON list of targets once a minute in one paced
