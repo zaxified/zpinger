@@ -1,9 +1,9 @@
-# fping-watch
+# zpinger
 
 A small ping monitor built on the `zig_fping` library: a daemon that pings a
 handful of targets once a minute and serves a web page with the last 24 hours.
 
-![fping-watch: eleven targets with status, recent cycles and uptime; one row expanded to its 24-hour latency chart](doc/screenshot.png)
+![zpinger: eleven targets with status, recent cycles and uptime; one row expanded to its 24-hour latency chart](doc/screenshot.png)
 
 <sub>Sample data: one target paused, one acknowledged, one row expanded.</sub>
 
@@ -42,8 +42,8 @@ handful of targets once a minute and serves a web page with the last 24 hours.
 Writable is the default: you run it for yourself, on loopback. The public
 demo is the same package with one setting changed ([Deploying](#deploying)).
 
-It is the library's example application and a public demo, finished for that
-purpose and deliberately kept small enough to read in one sitting:
+It started as zig-fping's example application (`fping-watch`, up to 1.0.0)
+and is kept small enough to read in one sitting:
 `src/monitor.zig` (targets, probing, history, persistence), `src/main.zig`
 (HTTP server and API), `src/web/` (the page; no framework and no build step,
 embedded into the binary). Nothing beyond Zig's standard library and
@@ -58,7 +58,7 @@ checkout with `zig build --fork=../zig-fping`:
 
 ```sh
 zig build                     # ReleaseSafe by default
-./zig-out/bin/fping-watch --targets targets.json --history history.json
+./zig-out/bin/zpinger --targets targets.json --history history.json
 # open http://127.0.0.1:8080
 ```
 
@@ -141,8 +141,7 @@ another site cannot change the targets behind your back.
 
 ## Scope
 
-Kept out on purpose, so the example stays small; they belong to a real
-monitoring product, not to a library demo:
+Not there yet; know them before you expose it:
 
 - **No authentication.** Without `--read-only`, anyone who reaches the port can
   change the targets. The default address is loopback; the public instance runs
@@ -200,47 +199,52 @@ compresses well: enable compression in the proxy (`encode` below).
 
 ## Deploying
 
-Every zig-fping release carries `fping-watch_<version>_amd64.deb` and
+Every zpinger release carries `zpinger_<version>_amd64.deb` and
 `_arm64.deb` (built by `package.sh`; checksums in `SHA256SUMS`). The binary is
 static; the package needs only `init-system-helpers`, which every Debian or
 Ubuntu with systemd has.
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS
-apt install ./fping-watch_1.0.0_amd64.deb
+apt install ./zpinger_1.0.0_amd64.deb
 ```
 
-That installs, enables and starts `fping-watch.service` on `127.0.0.1:8080`,
+That installs, enables and starts `zpinger.service` on `127.0.0.1:8080`,
 writable and with no targets yet: open the page and add them (on a server,
 through a tunnel: `ssh -L 8080:127.0.0.1:8080 server`).
 
 | path | |
 |---|---|
-| `/usr/bin/fping-watch` | the binary |
-| `/usr/lib/systemd/system/fping-watch.service` | the service ([deploy/fping-watch.service](deploy/fping-watch.service)) |
-| `/etc/fping-watch/env` | optional settings, below |
-| `/var/lib/fping-watch/targets.json` | the target list the page edits (systemd `StateDirectory`) |
-| `/var/lib/fping-watch/history.json` | the history |
-| `/usr/share/fping-watch/targets.json` | a sample list: public resolvers and sites, IPv4 and IPv6 |
-| `/usr/share/fping-watch/Caddyfile` | a Caddy site to start from ([deploy/Caddyfile](deploy/Caddyfile)) |
+| `/usr/bin/zpinger` | the binary |
+| `/usr/lib/systemd/system/zpinger.service` | the service ([deploy/zpinger.service](deploy/zpinger.service)) |
+| `/etc/zpinger/env` | optional settings, below |
+| `/var/lib/zpinger/targets.json` | the target list the page edits (systemd `StateDirectory`) |
+| `/var/lib/zpinger/history.json` | the history |
+| `/usr/share/zpinger/targets.json` | a sample list: public resolvers and sites, IPv4 and IPv6 |
+| `/usr/share/zpinger/Caddyfile` | a Caddy site to start from ([deploy/Caddyfile](deploy/Caddyfile)) |
 
-Settings go in `/etc/fping-watch/env` (then `systemctl restart fping-watch`):
+Settings go in `/etc/zpinger/env` (then `systemctl restart zpinger`):
 
 | variable | default | |
 |---|---|---|
-| `FPING_WATCH_LISTEN` | `127.0.0.1:8080` | the web server address |
-| `FPING_WATCH_TARGETS` | `/var/lib/fping-watch/targets.json` | the target list; a read-only instance points it at a file you manage, such as `/etc/fping-watch/targets.json` |
-| `FPING_WATCH_OPTS` | (none) | further options: `--read-only`, `--allow-host NAME` |
+| `ZPINGER_LISTEN` | `127.0.0.1:8080` | the web server address |
+| `ZPINGER_TARGETS` | `/var/lib/zpinger/targets.json` | the target list; a read-only instance points it at a file you manage, such as `/etc/zpinger/targets.json` |
+| `ZPINGER_OPTS` | (none) | further options: `--read-only`, `--allow-host NAME` |
 
 Upgrades restart the service (and leave it alone if you disabled it).
 `apt remove` keeps the settings, the list and the history; `apt purge`
 deletes them.
 
+zpinger was called `fping-watch` up to 1.0.0. The package conflicts with the
+old `fping-watch` package (same default port); its `/etc/fping-watch/env`
+and `/var/lib/fping-watch/` are not carried over (variables are now
+`ZPINGER_*`).
+
 The service runs as a throwaway user (`DynamicUser`) that can write only its
 state directory, with no capabilities at all and under a strict sandbox:
 seccomp `@system-service`, IPv4/IPv6 sockets only, a private user namespace,
 no writable-executable memory, read-only system, `TasksMax` and `MemoryMax`
-(`systemd-analyze security fping-watch`: 1.3, "OK").
+(`systemd-analyze security zpinger`: 1.3, "OK").
 
 ICMP goes through unprivileged ping sockets, which
 `net.ipv4.ping_group_range` must allow for the service's group. systemd's
@@ -248,7 +252,7 @@ own defaults (`/usr/lib/sysctl.d/50-default.conf`, on Debian and Ubuntu)
 allow every group; `sysctl net.ipv4.ping_group_range` shows what a host has.
 Where they do not, `/healthz` reports `"probing_ok":false` and the journal
 `probing failed: PermissionDenied`: allow ping sockets in `/etc/sysctl.d/`,
-or give the service raw sockets instead (`systemctl edit fping-watch`):
+or give the service raw sockets instead (`systemctl edit zpinger`):
 
 ```ini
 [Service]
@@ -264,30 +268,30 @@ With Ansible: the settings first, then the package, so the service never
 runs writable; the health check then insists on read-only.
 
 ```yaml
-- name: fping-watch settings directory
-  ansible.builtin.file: { path: /etc/fping-watch, state: directory, mode: "0755" }
-- name: fping-watch settings
+- name: zpinger settings directory
+  ansible.builtin.file: { path: /etc/zpinger, state: directory, mode: "0755" }
+- name: zpinger settings
   ansible.builtin.copy:
-    dest: /etc/fping-watch/env
+    dest: /etc/zpinger/env
     mode: "0644"
     content: |
-      FPING_WATCH_LISTEN=127.0.0.1:8080
-      FPING_WATCH_TARGETS=/etc/fping-watch/targets.json
-      FPING_WATCH_OPTS=--demo
-  notify: restart fping-watch
-- name: fping-watch targets
-  ansible.builtin.copy: { src: targets.json, dest: /etc/fping-watch/targets.json, mode: "0644" }
-  notify: restart fping-watch
-- name: fping-watch package
+      ZPINGER_LISTEN=127.0.0.1:8080
+      ZPINGER_TARGETS=/etc/zpinger/targets.json
+      ZPINGER_OPTS=--demo
+  notify: restart zpinger
+- name: zpinger targets
+  ansible.builtin.copy: { src: targets.json, dest: /etc/zpinger/targets.json, mode: "0644" }
+  notify: restart zpinger
+- name: zpinger package
   ansible.builtin.get_url:
-    url: https://github.com/zaxified/zig-fping/releases/download/vX.Y.Z/fping-watch_1.0.0_amd64.deb
-    dest: /var/cache/fping-watch_1.0.0_amd64.deb
+    url: https://github.com/zaxified/zpinger/releases/download/vX.Y.Z/zpinger_1.0.0_amd64.deb
+    dest: /var/cache/zpinger_1.0.0_amd64.deb
     # Pinned from the release's SHA256SUMS: a checksum fetched along with
     # the package would prove nothing.
     checksum: "sha256:<the hash from SHA256SUMS>"
-- name: fping-watch installed
-  ansible.builtin.apt: { deb: /var/cache/fping-watch_1.0.0_amd64.deb }
-- name: fping-watch is healthy and read-only
+- name: zpinger installed
+  ansible.builtin.apt: { deb: /var/cache/zpinger_1.0.0_amd64.deb }
+- name: zpinger is healthy and read-only
   ansible.builtin.uri: { url: "http://127.0.0.1:8080/healthz" }
   register: health
   until: health.status == 200 and health.json.read_only
@@ -338,20 +342,20 @@ the live hour. Time-of-day scenarios stay where they are; the others are
 placed relative to the live hour, so they never fall into it, and move on
 with it every hour. The sample data is never written to the history file. Live probing stays real, so choose
 targets that answer. The package ships a list of public IPv4 and IPv6
-targets with one scenario each, `/usr/share/fping-watch/demo-targets.json`
-(`FPING_WATCH_TARGETS` can point at it directly); its DOWN target is in
+targets with one scenario each, `/usr/share/zpinger/demo-targets.json`
+(`ZPINGER_TARGETS` can point at it directly); its DOWN target is in
 203.0.113.0/24, a range reserved for documentation (RFC 5737) that never
 answers.
 
 ## About page
 
 For a page that lists several demos, the package carries a description of
-this one in `/usr/share/fping-watch/about/` (`zig build about` writes the same
+this one in `/usr/share/zpinger/about/` (`zig build about` writes the same
 into `zig-out/about/`), generated from [deploy/about.json](deploy/about.json):
 
 | file | |
 |---|---|
-| `about-card.html` | an HTML fragment to include: one `<article class="demo" id="demo-fping-watch">`, no styles, no scripts; class names (`demo-title`, `demo-tagline`, `demo-screenshot`, `demo-summary`, `demo-features`, `demo-facts`, `demo-source`) for the hub to style, schema.org `SoftwareApplication` microdata, `data-version` |
+| `about-card.html` | an HTML fragment to include: one `<article class="demo" id="demo-zpinger">`, no styles, no scripts; class names (`demo-title`, `demo-tagline`, `demo-screenshot`, `demo-summary`, `demo-features`, `demo-facts`, `demo-source`) for the hub to style, schema.org `SoftwareApplication` microdata, `data-version` |
 | `about.html` | the same card as a standalone page (light and dark) |
 | `about.json` | the same data plus `version`, for templating |
 | `screenshot.png` | referenced by both pages relatively, keep it next to them |
@@ -360,10 +364,10 @@ None of them links to the demo itself: only the hub knows its URL. With
 Ansible, after the package is installed on the same host:
 
 ```yaml
-- name: fping-watch about card
+- name: zpinger about card
   ansible.builtin.copy:
-    src: /usr/share/fping-watch/about/
-    dest: "{{ demo_hub_root }}/fping-watch/"
+    src: /usr/share/zpinger/about/
+    dest: "{{ demo_hub_root }}/zpinger/"
     remote_src: true
 ```
 
@@ -377,3 +381,10 @@ sh smoke.sh        # end to end: loopback targets, API, ETag, health, Host guard
 
 `smoke.sh` runs itself in an isolated network namespace through
 `scripts/netns-run`; `package.sh` resolves Zig through `scripts/zig-env.sh`.
+
+## License
+
+MIT ([LICENSE](LICENSE)). The zig-fping library linked into the binary is
+under the fping licence (BSD-style): this product includes software
+developed by Stanford University. The package's `copyright` file carries
+both texts.

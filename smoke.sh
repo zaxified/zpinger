@@ -2,7 +2,7 @@
 # End-to-end smoke test: run the daemon against loopback targets with a short
 # cycle, then check the API, the write endpoints and the read-only mode.
 #
-#   ./smoke.sh [path/to/fping-watch]
+#   ./smoke.sh [path/to/zpinger]
 #
 # Inside this repository it re-runs itself in an isolated network namespace
 # (scripts/netns-run: loopback up, unprivileged ICMP sockets); a standalone
@@ -10,7 +10,7 @@
 set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-BIN=$(realpath "${1:-$HERE/zig-out/bin/fping-watch}")
+BIN=$(realpath "${1:-$HERE/zig-out/bin/zpinger}")
 NETNS_RUN="$HERE/scripts/netns-run"
 if [ -z "${ZFPING_NETNS:-}" ] && [ -x "$NETNS_RUN" ]; then
     exec "$NETNS_RUN" sh "$0" "$BIN"
@@ -54,7 +54,7 @@ status() {
     [ "$got" = "$1" ] || fail "$2 $3: HTTP $got, expected $1 ($(cat body))"
 }
 
-"$BIN" --version | grep -q '^fping-watch [0-9]' || fail "--version"
+"$BIN" --version | grep -q '^zpinger [0-9]' || fail "--version"
 "$BIN" --read-only --targets missing.json >log 2>&1 && fail "read-only started without a target list"
 grep -q 'cannot load the targets from missing.json: FileNotFound' log || fail "startup error message: $(cat log)"
 

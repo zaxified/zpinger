@@ -6,17 +6,17 @@
 set -e
 case "$1" in
     configure | abort-upgrade | abort-deconfigure | abort-remove)
-        deb-systemd-helper unmask fping-watch.service >/dev/null || true
+        deb-systemd-helper unmask zpinger.service >/dev/null || true
         # was-enabled is true on a first install.
-        if deb-systemd-helper --quiet was-enabled fping-watch.service; then
-            deb-systemd-helper enable fping-watch.service >/dev/null || true
+        if deb-systemd-helper --quiet was-enabled zpinger.service; then
+            deb-systemd-helper enable zpinger.service >/dev/null || true
         else
-            deb-systemd-helper update-state fping-watch.service >/dev/null || true
+            deb-systemd-helper update-state zpinger.service >/dev/null || true
         fi
         if [ -d /run/systemd/system ]; then
             systemctl --system daemon-reload >/dev/null || true
             if [ -n "$2" ]; then action=restart; else action=start; fi
-            deb-systemd-invoke "$action" fping-watch.service >/dev/null || true
+            deb-systemd-invoke "$action" zpinger.service >/dev/null || true
         fi
         ;;
 esac

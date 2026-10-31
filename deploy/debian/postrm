@@ -7,12 +7,12 @@ set -e
 [ -d /run/systemd/system ] && systemctl --system daemon-reload >/dev/null || true
 case "$1" in
     remove)
-        deb-systemd-helper mask fping-watch.service >/dev/null || true
+        deb-systemd-helper mask zpinger.service >/dev/null || true
         ;;
     purge)
-        deb-systemd-helper purge fping-watch.service >/dev/null || true
-        deb-systemd-helper unmask fping-watch.service >/dev/null || true
-        rm -rf /etc/fping-watch /var/lib/fping-watch /var/lib/private/fping-watch
+        deb-systemd-helper purge zpinger.service >/dev/null || true
+        deb-systemd-helper unmask zpinger.service >/dev/null || true
+        rm -rf /etc/zpinger /var/lib/zpinger /var/lib/private/zpinger
         ;;
 esac
 exit 0

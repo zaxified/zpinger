@@ -6,6 +6,10 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
+- **Renamed to zpinger**, licensed MIT. Binary, package, service,
+  `/etc/zpinger/env`, `/var/lib/zpinger/` and the `ZPINGER_*` variables
+  replace their `fping-watch` names; the package conflicts with
+  `fping-watch` and carries nothing over from it.
 - **Own repository.** zig-fping is now a package dependency pinned to the
   `v0.2.1` tag (by URL and hash) instead of the parent checkout;
   `scripts/netns-run` and `scripts/zig-env.sh` are copied from zig-fping.
@@ -22,7 +26,7 @@ and these entries come from zig-fping's CHANGELOG.md.
   `steady`, `evening_congestion`, `route_change`, `flapping`, `outage`,
   `down`, `bufferbloat`, `long_haul`), scaled to the target's real latency.
   The chart shades it as "sample data"; it is never written to the history
-  file. The package ships `/usr/share/fping-watch/demo-targets.json`:
+  file. The package ships `/usr/share/zpinger/demo-targets.json`:
   public IPv4 and IPv6 targets, the DOWN one in 203.0.113.0/24 (RFC 5737).
   `/healthz` reports `demo`.
 - **Status pills filter the list**: `ok` and `nok` (DOWN, LOSS now, or a

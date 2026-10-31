@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const exe = b.addExecutable(.{ .name = "fping-watch", .root_module = mod, .use_llvm = use_llvm });
+    const exe = b.addExecutable(.{ .name = "zpinger", .root_module = mod, .use_llvm = use_llvm });
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);

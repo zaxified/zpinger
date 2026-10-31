@@ -1,4 +1,4 @@
-// fping-watch front end: polls /api/state and renders it. No framework, no
+// zpinger front end: polls /api/state and renders it. No framework, no
 // build step; every user-supplied string goes through textContent.
 "use strict";
 
@@ -167,7 +167,7 @@ async function load() {
 
 // A read-only demo shows every control, so it looks like the real thing;
 // using one explains instead of failing (the server refuses anyway).
-const DEMO_NOTE = "This is a read-only demo: changes are disabled. Install fping-watch to manage your own targets.";
+const DEMO_NOTE = "This is a read-only demo: changes are disabled. Install zpinger to manage your own targets.";
 
 async function call(method, path, body) {
   if (state.read_only) throw new Error(DEMO_NOTE);

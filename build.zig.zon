@@ -1,9 +1,9 @@
 .{
-    .name = .fping_watch,
+    .name = .zpinger,
     .version = "1.0.0",
     .minimum_zig_version = "0.17.0",
-    .fingerprint = 0x35ee980ba83c73f5,
-    .paths = .{ "build.zig", "build.zig.zon", "src", "tools", "deploy", "targets.json", "smoke.sh", "package.sh", "README.md", "doc" },
+    .fingerprint = 0x7a949a81c7030d18,
+    .paths = .{ "build.zig", "build.zig.zon", "src", "tools", "deploy", "targets.json", "smoke.sh", "package.sh", "README.md", "LICENSE", "doc" },
     .dependencies = .{
         // `?ref=` is only a note for the reader: Zig fetches the commit in
         // the fragment, and the hash holds the pin.

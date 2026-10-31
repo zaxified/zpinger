@@ -1,31 +1,31 @@
-# fping-watch, shipped in the .deb (package.sh). Writable on loopback by
-# default; local settings belong in /etc/fping-watch/env, not here:
-#   FPING_WATCH_LISTEN=ADDR:PORT       (default 127.0.0.1:8080)
-#   FPING_WATCH_TARGETS=FILE           (default: in the state directory, so
-#                                       changes made in the page persist)
-#   FPING_WATCH_OPTS=--read-only       (a public demo; also --allow-host NAME)
+# zpinger, shipped in the .deb (package.sh). Writable on loopback by
+# default; local settings belong in /etc/zpinger/env, not here:
+#   ZPINGER_LISTEN=ADDR:PORT       (default 127.0.0.1:8080)
+#   ZPINGER_TARGETS=FILE           (default: in the state directory, so
+#                                  changes made in the page persist)
+#   ZPINGER_OPTS=--read-only       (a public demo; also --allow-host NAME)
 [Unit]
-Description=fping-watch ping monitor
-Documentation=https://github.com/zaxified/zig-fping/tree/main/example-apps/fping-watch
+Description=zpinger ping monitor
+Documentation=https://github.com/zaxified/zpinger
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Environment=FPING_WATCH_LISTEN=127.0.0.1:8080
-Environment=FPING_WATCH_TARGETS=/var/lib/fping-watch/targets.json
-Environment=FPING_WATCH_OPTS=
-EnvironmentFile=-/etc/fping-watch/env
-# $FPING_WATCH_OPTS unbraced: split into words, none when empty.
-ExecStart=/usr/bin/fping-watch --listen ${FPING_WATCH_LISTEN} \
-    --targets ${FPING_WATCH_TARGETS} --history /var/lib/fping-watch/history.json \
-    $FPING_WATCH_OPTS
+Environment=ZPINGER_LISTEN=127.0.0.1:8080
+Environment=ZPINGER_TARGETS=/var/lib/zpinger/targets.json
+Environment=ZPINGER_OPTS=
+EnvironmentFile=-/etc/zpinger/env
+# $ZPINGER_OPTS unbraced: split into words, none when empty.
+ExecStart=/usr/bin/zpinger --listen ${ZPINGER_LISTEN} \
+    --targets ${ZPINGER_TARGETS} --history /var/lib/zpinger/history.json \
+    $ZPINGER_OPTS
 Restart=on-failure
 RestartSec=5s
 
-# Identity and files: a throwaway user, writable only /var/lib/fping-watch.
+# Identity and files: a throwaway user, writable only /var/lib/zpinger.
 DynamicUser=yes
-StateDirectory=fping-watch
-WorkingDirectory=/var/lib/fping-watch
+StateDirectory=zpinger
+WorkingDirectory=/var/lib/zpinger
 UMask=0077
 
 # No capabilities at all. ICMP goes through unprivileged ping sockets, which

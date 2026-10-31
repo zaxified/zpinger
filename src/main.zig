@@ -1,4 +1,4 @@
-//! fping-watch — a small ping monitor built on zig-fping.
+//! zpinger — a small ping monitor built on zig-fping.
 //!
 //! Pings a handful of targets once a minute and serves a web page with the
 //! last 24 hours: status, latency and packet loss per target, plus buttons to
@@ -15,7 +15,7 @@ const StateTag = @import("monitor.zig").StateTag;
 const log = std.log.scoped(.web);
 
 const usage =
-    \\usage: fping-watch [options]
+    \\usage: zpinger [options]
     \\
     \\  --listen ADDR:PORT   web server address (default 127.0.0.1:8080)
     \\  --targets FILE       target list, JSON (default targets.json)
@@ -52,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
         if (std.mem.eql(u8, arg, "--version")) {
-            print(io, "fping-watch {s}\n", .{version});
+            print(io, "zpinger {s}\n", .{version});
             return;
         }
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) return fail(io, "");
@@ -81,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
     var server = address.listen(io, .{ .reuse_address = true }) catch |err|
         fatal(io, "cannot listen on {s}: {t}", .{ listen_text, err });
     defer server.deinit(io);
-    log.info("fping-watch {s} listening on http://{s} ({d} targets{s})", .{
+    log.info("zpinger {s} listening on http://{s} ({d} targets{s})", .{
         version, listen_text, monitor.targets.items.len, if (monitor.demo) ", demo" else if (monitor.read_only) ", read-only" else "",
     });
 
@@ -169,14 +169,14 @@ const Connections = struct {
 };
 
 fn fail(io: Io, msg: []const u8) noreturn {
-    if (msg.len > 0) eprint(io, "fping-watch: {s}\n", .{msg});
+    if (msg.len > 0) eprint(io, "zpinger: {s}\n", .{msg});
     eprint(io, usage, .{});
     std.process.exit(2);
 }
 
 /// A startup error: one readable line (systemd shows it), no stack trace.
 fn fatal(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
-    eprint(io, "fping-watch: " ++ fmt ++ "\n", args);
+    eprint(io, "zpinger: " ++ fmt ++ "\n", args);
     std.process.exit(1);
 }
 
