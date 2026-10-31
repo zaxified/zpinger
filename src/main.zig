@@ -16,6 +16,7 @@ const StateTag = @import("monitor.zig").StateTag;
 const Tracer = @import("trace.zig").Tracer;
 const trace = @import("trace.zig");
 const netaddr = @import("netaddr");
+const ratelimit = @import("ratelimit");
 const events = @import("events.zig");
 
 const log = std.log.scoped(.web);
@@ -143,6 +144,9 @@ pub fn main(init: std.process.Init) !void {
     monitor.loadHistory() catch |err| fatal(io, "cannot load the history from {s}: {t} (move it away to start afresh)", .{ monitor.history_path.?, err });
 
     const address = Io.net.IpAddress.parseLiteral(listen_text) catch return fail(io, "bad --listen");
+    // The server binds a name and a port; the literal is checked above.
+    var addr_buf: [netaddr.max_ip_text_len]u8 = undefined;
+    const addr_text = netaddr.formatIp(ipOf(address), &addr_buf);
     var admission: Admission = .{ .io = io, .gpa = gpa, .guard = .init(gpa, .{ .max_conns_per_ip = max_connections_per_ip }) };
     defer admission.deinit();
     var server = http.Server.init(io, gpa, .{
@@ -153,6 +157,13 @@ pub fn main(init: std.process.Init) !void {
         .on_conn_state = Admission.onConnState,
         .on_conn_state_ctx = &admission,
         .on_error = onError,
+        .addr = addr_text,
+        .port = address.getPort(),
+        // SO_REUSEADDR (the default) without SO_REUSEPORT: a second
+        // instance on the same port fails to start instead of silently
+        // taking part of the requests (a trace then looks unwatched on one,
+        // missing on the other).
+        .reuse_port = false,
         .read_timeout_ms = read_timeout_ms,
         // Also bounds the wait for a request, the first one included (an
         // `idle_timeout_ms` would replace it there, on the first one too).
@@ -168,11 +179,8 @@ pub fn main(init: std.process.Init) !void {
         .error_headers = &security_headers,
     });
     defer server.deinit();
-    // zig-libs request: http — bind with SO_REUSEADDR but without
-    // SO_REUSEPORT (Go's default); `bind` offers neither or both. Until
-    // then the listener is bound here and handed to the server.
-    server.listener = listenExclusive(address) catch |err|
-        fatal(io, "cannot listen on {s}: {t}", .{ listen_text, err });
+    server.bind() catch |err|
+        fatal(io, "cannot listen on {s}: {s}", .{ listen_text, server.bindErrorName() orelse @errorName(err) });
     _ = events.emit(.info, .start, .system, null, "version={s} listen={s} targets={d} mode={s} trust_proxy={} allow_host={d} trace_max={d} access_log={t} dns_stale={d}", .{
         version,                                                                          listen_text, monitor.targets.items.len,
         if (monitor.demo) "demo" else if (monitor.read_only) "read-only" else "writable", trust_proxy, allowed_hosts.len,
@@ -190,43 +198,6 @@ pub fn main(init: std.process.Init) !void {
     server.serve() catch |err| fatal(io, "serving failed: {t}", .{err});
 }
 
-/// A listening socket with SO_REUSEADDR only. std's `listen` sets
-/// SO_REUSEPORT together with SO_REUSEADDR, and with it a second instance
-/// binds the same port and silently takes part of the requests (a trace
-/// then looks unwatched on one, missing on the other). SO_REUSEADDR is kept:
-/// this server closes its connections, and a restart must not wait out
-/// their TIME_WAIT. Linux only, like the ping sockets.
-fn listenExclusive(address: Io.net.IpAddress) error{ AddressInUse, ListenFailed }!Io.net.Server {
-    const linux = std.os.linux;
-    const rc = linux.socket(switch (address) {
-        .ip4 => linux.AF.INET,
-        .ip6 => linux.AF.INET6,
-    }, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
-    if (linux.errno(rc) != .SUCCESS) return error.ListenFailed;
-    const fd: linux.fd_t = @intCast(rc);
-    errdefer _ = linux.close(fd);
-    const one: c_int = 1;
-    if (linux.errno(linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, std.mem.asBytes(&one), @sizeOf(c_int))) != .SUCCESS)
-        return error.ListenFailed;
-    const bound = switch (address) {
-        .ip4 => |a| blk: {
-            const sa: linux.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, a.port), .addr = @bitCast(a.bytes) };
-            break :blk linux.bind(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in));
-        },
-        .ip6 => |a| blk: {
-            const sa: linux.sockaddr.in6 = .{ .port = std.mem.nativeToBig(u16, a.port), .flowinfo = 0, .addr = a.bytes, .scope_id = 0 };
-            break :blk linux.bind(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in6));
-        },
-    };
-    switch (linux.errno(bound)) {
-        .SUCCESS => {},
-        .ADDRINUSE => return error.AddressInUse,
-        else => return error.ListenFailed,
-    }
-    if (linux.errno(linux.listen(fd, 128)) != .SUCCESS) return error.ListenFailed;
-    return .{ .socket = .{ .handle = fd, .address = address }, .options = {} };
-}
-
 /// Limits for a server reachable from the internet. Every connection holds
 /// a thread, so at most `max_connections` are open at once, at most
 /// `max_connections_per_ip` from one client (an IPv6 /64), and more are
@@ -242,12 +213,10 @@ const max_body_bytes = 4096;
 /// `abuseguard.Guard`. A peer on loopback is the reverse proxy, carrying
 /// every client on one address: only the global cap applies to it.
 ///
-/// It also follows every connection to its end, to report one that closes
-/// without a single request: a slowloris holding a thread until the read
-/// timeout, a port scan, a TLS client on the plain-HTTP port.
-/// zig-libs request: http — no report of a timeout once a request has
-/// started (a body sent a byte at a time, a response read that slowly):
-/// only a connection with no request at all is seen here.
+/// It also follows every connection to its end: one a timeout cut off (a
+/// slowloris holding a thread, a slow reader) is reported by `onError`
+/// with what was counted here, one that closed without a single request (a
+/// port scan, a TLS client on the plain-HTTP port) here.
 const Admission = struct {
     io: Io,
     gpa: std.mem.Allocator,
@@ -323,16 +292,42 @@ const Admission = struct {
                     defer a.mutex.unlock(a.io);
                     break :blk (a.live.fetchRemove(keyOf(peer)) orelse return).value;
                 };
-                if (conn.requests > 0) return;
                 const ms: i64 = @intCast(@divTrunc(now - conn.started_ns, std.time.ns_per_ms));
-                // Held to the read timeout, or closed by the client itself.
-                const timed_out = ms >= read_timeout_ms - 500;
-                if (timed_out) {
-                    _ = events.emit(.warn, .conn, .conn, .of(ip), "action=closed reason=timeout requests=0 ms={d}", .{ms});
-                } else {
+                // The server reports a timeout after `.closed`, on this
+                // thread: `onError` takes the counts from here.
+                last_closed = .{ .key = keyOf(peer), .requests = conn.requests, .ms = ms };
+                // Near the read timeout it was the timeout (reported then),
+                // else the client closed it.
+                if (conn.requests == 0 and ms < read_timeout_ms - 500)
                     _ = events.emit(.info, .conn, .conn, .of(ip), "action=closed reason=no_request requests=0 ms={d}", .{ms});
-                }
             },
+        }
+    }
+
+    /// The connection this thread closed last, for `onError`'s timeout line.
+    threadlocal var last_closed: ?struct { key: ConnKey, requests: u32, ms: i64 } = null;
+
+    /// A connection a deadline cut off: `err` names the phase. Waiting
+    /// for the next request on a kept-alive connection is what browsers
+    /// do, not an attack: only a debug line.
+    fn timedOut(peer: Io.net.IpAddress, err: anyerror) void {
+        const ip = ipOf(peer);
+        const c = last_closed orelse return;
+        last_closed = null;
+        if (!std.mem.eql(u8, &c.key, &keyOf(peer))) return;
+        const phase: []const u8 = switch (err) {
+            error.NoRequestTimeout => "no_request",
+            error.IdleTimeout => "idle",
+            error.HeadTimeout => "head",
+            error.BodyTimeout => "body",
+            error.WriteTimeout => "write",
+            error.ResponseTimeout => "response",
+            else => "read",
+        };
+        if (err == error.IdleTimeout) {
+            _ = events.emit(.debug, .conn, .conn, .of(ip), "action=closed reason=idle requests={d} ms={d} phase={s}", .{ c.requests, c.ms, phase });
+        } else {
+            _ = events.emit(.warn, .conn, .conn, .of(ip), "action=closed reason=timeout requests={d} ms={d} phase={s}", .{ c.requests, c.ms, phase });
         }
     }
 };
@@ -357,6 +352,7 @@ fn onError(_: ?*anyopaque, kind: http.Server.ErrorKind, err: ?anyerror, status: 
             status, kind, err orelse error.Unknown,
         }),
         .accept_failed => log.warn("accept: {t}", .{err orelse error.Unknown}),
+        .timed_out => if (peer) |p| Admission.timedOut(p, err orelse error.Unknown),
     }
 }
 
@@ -480,24 +476,16 @@ var allowed_hosts: []const []const u8 = &.{};
 /// read-only instance changes nothing and shows only what it publishes, so
 /// it answers to any name and its proxy needs no configuration.
 fn hostAllowed(req: *const Request) bool {
-    return hostNameAllowed(req.header("host") orelse return false, allowed_hosts);
-}
-
-fn hostNameAllowed(host: []const u8, allowed: []const []const u8) bool {
-    if (Io.net.IpAddress.parseLiteral(host)) |_| return true else |_| {}
-    var name = host[0 .. std.mem.findScalar(u8, host, ':') orelse host.len];
-    if (std.mem.endsWith(u8, name, ".")) name = name[0 .. name.len - 1];
-    if (std.ascii.eqlIgnoreCase(name, "localhost")) return true;
-    for (allowed) |a| if (std.ascii.eqlIgnoreCase(name, a)) return true;
-    return false;
+    const guard: http.HostGuard = .{ .allowed = allowed_hosts };
+    return guard.check(req);
 }
 
 test "writable instance: Host header guard" {
-    const allowed: []const []const u8 = &.{"ping.example.org"};
+    const guard: http.HostGuard = .{ .allowed = &.{"ping.example.org"} };
     for ([_][]const u8{ "127.0.0.1", "127.0.0.1:8080", "[::1]:8080", "192.0.2.7", "localhost:8080", "LOCALHOST.", "ping.example.org", "Ping.Example.Org:443" }) |h|
-        try std.testing.expect(hostNameAllowed(h, allowed));
-    for ([_][]const u8{ "", "evil.example", "evil.example:8080", "localhost.evil.example", "127.0.0.1.evil.example", "ping.example.org.evil.example" }) |h|
-        try std.testing.expect(!hostNameAllowed(h, allowed));
+        try std.testing.expect(guard.allows(h));
+    for ([_][]const u8{ "", "evil.example", "evil.example:8080", "localhost.evil.example", "127.0.0.1.evil.example", "ping.example.org.evil.example", "sub.ping.example.org" }) |h|
+        try std.testing.expect(!guard.allows(h));
 }
 
 fn route(monitor: *Monitor, req: *Request, rw: *ResponseWriter, arena: std.mem.Allocator) !void {
@@ -606,22 +594,19 @@ fn traceTarget(path: []const u8) ?u32 {
 var trust_proxy = true;
 
 /// Who a request comes from: the peer address, or behind a proxy on
-/// loopback the last `X-Forwarded-For` entry, the one the proxy itself
-/// added (earlier ones come from the client and prove nothing). A peer
-/// outside loopback cannot get its header trusted (`xff_ignored`).
+/// loopback the address its `X-Forwarded-For` vouches for (the rightmost
+/// entry that is not loopback itself; earlier ones come from the client and
+/// prove nothing). A peer outside loopback cannot get its header trusted
+/// (`xff_ignored`).
 fn clientOf(req: *const Request) struct { who: events.Who, xff_ignored: bool } {
+    const trusted: ratelimit.TrustedProxies = if (trust_proxy) .loopback else .none;
     // Served over a socket, a request always has its peer; without one
     // (tests), the unspecified address.
-    const peer: netaddr.Ip = if (req.peerAddress()) |p| ipOf(p) else .{ .v4 = @splat(0) };
-    var headers = req.iterateHeaders();
-    var last: ?[]const u8 = null;
-    while (headers.next()) |h| if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-for")) {
-        last = h.value;
-    };
-    const list = last orelse return .{ .who = .of(peer), .xff_ignored = false };
-    if (!trust_proxy or !peer.isLoopback()) return .{ .who = .of(peer), .xff_ignored = true };
-    const entry = list[if (std.mem.findScalarLast(u8, list, ',')) |c| c + 1 else 0..];
-    const client = netaddr.parseIp(std.mem.trim(u8, entry, " \t")) orelse peer;
+    const unspecified: netaddr.Ip = .{ .v4 = @splat(0) };
+    const peer: netaddr.Ip = if (req.peerAddress()) |p| ipOf(p).unmap() else unspecified;
+    const client = ratelimit.clientIp(req, trusted) orelse unspecified;
+    const xff_ignored = !trusted.trusts(peer) and req.header("x-forwarded-for") != null;
+    if (client.eql(peer)) return .{ .who = .of(peer), .xff_ignored = xff_ignored };
     return .{ .who = .{ .client = client, .peer = peer }, .xff_ignored = false };
 }
 

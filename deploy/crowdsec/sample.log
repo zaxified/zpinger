@@ -7,4 +7,4 @@ Oct 31 11:05:00 host zpinger[1234]: event: event=trace client=127.0.0.1 action=s
 Oct 31 11:06:00 host zpinger[1234]: event: event=http client=127.0.0.1 status=503 reason=trace_cap method="POST" path="/api/targets/2/trace" ms=0 bytes=63 ua="curl/8.18.0"
 Oct 31 11:07:00 host zpinger[1234]: event: event=http client=127.0.0.1 status=400 reason=bad_request_head
 Oct 31 11:08:00 host zpinger[1234]: event: event=audit client=127.0.0.1 action=add target=3 name="x" host="127.0.0.5" tags=0
-Oct 31 11:09:00 host zpinger[1234]: event: event=conn client=127.0.0.1 action=closed reason=timeout requests=0 ms=10076
+Oct 31 11:09:00 host zpinger[1234]: event: event=conn client=127.0.0.1 action=closed reason=timeout requests=0 ms=10076 phase=no_request

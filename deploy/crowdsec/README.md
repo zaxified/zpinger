@@ -20,7 +20,7 @@ proxy).
 | `zpinger/api-probing` | sends changes zpinger refuses (read-only, not JSON, invalid, wrong method) | 5, 1 min |
 | `zpinger/host-mismatch` | asks a writable instance for a host name it does not serve (421: DNS rebinding, host scans) | 10, 10 min |
 | `zpinger/bad-requests` | sends malformed or oversized requests (400, 413, 414, 431) | 5, 1 min |
-| `zpinger/slowloris` | holds connections until the read timeout without a request | 30, 20 s (browsers leave a few preconnects unused) |
+| `zpinger/slowloris` | holds connections until a deadline cuts them off (no request, a trickled head or body, a slow reader) | 30, 20 s (browsers leave a few preconnects unused) |
 | `zpinger/conn-flood` | keeps opening connections past the 16 per client | 20, 10 s |
 
 A request that came straight from the client (no `peer=` in its line:

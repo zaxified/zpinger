@@ -1,11 +1,12 @@
-# Connections held open until the read timeout without a request: each
-# holds a thread for 10 s (slowloris). Only seen with zpinger facing the
+# Connections a 10 s deadline cut off: held open without a request, a head
+# or body sent a byte at a time, a response read that slowly. Each holds a
+# thread for 10 s (slowloris, slow readers). Only seen with zpinger facing the
 # clients itself; behind a proxy the proxy takes these. A browser opens a
 # socket or two ahead and may never use it (preconnect), so a few are
 # normal; an attacker holds up to 16 at a time and fills this in seconds.
 type: leaky
 name: zpinger/slowloris
-description: "Holds connections open without sending a request"
+description: "Holds connections open until a deadline cuts them off"
 filter: "evt.Meta.zp_event == 'conn' && evt.Meta.zp_action == 'closed' && evt.Meta.zp_reason == 'timeout'"
 groupby: evt.Meta.source_ip
 capacity: 30

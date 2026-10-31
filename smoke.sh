@@ -144,7 +144,10 @@ grep -q '"acked": true' targets.json || fail "ack not saved"
 wait "$IDLE"
 idle=$(( $(cat idle.end) - $(cat idle.start) ))
 [ "$idle" -ge 9 ] && [ "$idle" -le 13 ] || fail "idle connection closed after ${idle} s, expected ~10 s"
-grep -q 'event=conn client=127.0.0.1 action=closed reason=timeout requests=0 ms=' log || fail "idle connection not logged"
+grep -q 'event=conn client=127.0.0.1 action=closed reason=timeout requests=0 ms=[0-9]* phase=no_request' log || fail "idle connection not logged"
+# A second instance on the same port refuses to start (no SO_REUSEPORT).
+rc=0; timeout 5 "$BIN" --listen 127.0.0.1:$PORT --targets second.json >log2 2>&1 || rc=$?
+[ "$rc" = 1 ] && grep -q 'cannot listen on' log2 || fail "a second instance shared the port (rc=$rc)"
 stop
 
 # Read-only: history survives the restart, every change is refused.
