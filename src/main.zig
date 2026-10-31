@@ -27,6 +27,7 @@ const usage =
     \\  --allow-host NAME    also answer to this host name (repeatable); see README
     \\  --cycle SECONDS      seconds between probing cycles (default 60)
     \\  --trace-max N        live traces (target detail) running at once (default 4, 0 = off)
+    \\  --trace-names on|off reverse-DNS names of the trace hops (default on)
     \\  --version            print the version and exit
     \\
 ;
@@ -78,6 +79,12 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--trace-max")) {
             tracer_state.max_sessions = std.fmt.parseInt(u8, value, 10) catch return fail(io, "bad --trace-max");
             if (tracer_state.max_sessions > trace.max_slots) return fail(io, "--trace-max is at most 16");
+        } else if (std.mem.eql(u8, arg, "--trace-names")) {
+            if (std.mem.eql(u8, value, "on")) {
+                tracer_state.names = true;
+            } else if (std.mem.eql(u8, value, "off")) {
+                tracer_state.names = false;
+            } else return fail(io, "--trace-names is on or off");
         } else return fail(io, "unknown option");
     }
 

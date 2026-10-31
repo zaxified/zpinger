@@ -76,6 +76,7 @@ zig build                     # ReleaseSafe by default
 | `--allow-host NAME` | | a writable instance also answers to this host name (repeatable), see below |
 | `--cycle SECONDS` | `60` | seconds between cycles (the tests use 5) |
 | `--trace-max N` | `4` | live traces running at once, 0 turns them off ([Live trace](#live-trace)) |
+| `--trace-names on\|off` | `on` | reverse-DNS names of the trace hops |
 | `--version` | | print the version and exit |
 
 Pinging needs ICMP sockets: either unprivileged ones
@@ -122,7 +123,10 @@ the last minute as a sparkline. Loss at one hop that the hops after it do
 not show is usually that router limiting its ICMP answers, not loss on the
 path. It runs on the same unprivileged ping socket as the probing (zig-libs
 `traceroute`, which reads the routers' answers from the socket's error
-queue), so it needs no capability either.
+queue), so it needs no capability either. Hops are named by reverse DNS
+(PTR, through the system resolver, one lookup at a time beside the trace so
+a slow resolver never delays a round); `--trace-names off` shows only the
+addresses.
 
 A trace measures and changes nothing, so a read-only demo offers it too;
 the server bounds it, not the page: one trace per target, shared by every
@@ -158,7 +162,7 @@ not the expected one is shown as "no data".
 | `POST /api/targets/ID/pause`, `/resume` | stop and resume probing |
 | `POST /api/targets/ID/ack`, `/unack` | acknowledge a DOWN target, or withdraw the acknowledgement |
 | `POST /api/targets/ID/trace` | start a live trace of the target (or keep the running one); `202`, `503` when `--trace-max` traces run, `403` when traces are off |
-| `GET /api/targets/ID/trace` | the trace: `state`, `reason`, `rounds`, `reached`, and per hop `ttl`, `hosts` (latest first), `sent`, `recv`, `loss` (‰), `last`/`avg`/`best`/`worst`/`jitter` (µs, `null` = none), `code` (Destination Unreachable), `spark` (the last 60 rounds, µs or `null` = lost); polling keeps it running; `404` when none runs |
+| `GET /api/targets/ID/trace` | the trace: `state`, `reason`, `rounds`, `reached`, and per hop `ttl`, `hosts` (latest first), `names` (reverse DNS of `hosts[i]`, `null` = none or not yet), `sent`, `recv`, `loss` (‰), `last`/`avg`/`best`/`worst`/`jitter` (µs, `null` = none), `code` (Destination Unreachable), `spark` (the last 60 rounds, µs or `null` = lost); polling keeps it running; `404` when none runs |
 | `DELETE /api/targets/ID/trace` | stop it |
 | `GET /healthz` | `200 {"ok":true,"read_only":...,"demo":...}` while cycles keep finishing (at most 3 cycles apart) and the ICMP socket opens; `503` otherwise. Unreachable targets do not count: they are what is being monitored |
 

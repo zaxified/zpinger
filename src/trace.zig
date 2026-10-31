@@ -14,6 +14,10 @@
 //! Without CAP_NET_RAW it runs on an unprivileged ping socket, like the
 //! probing cycle.
 //!
+//! Hop names come from reverse DNS (PTR) on a second task per session, one
+//! lookup at a time, so a slow resolver never holds up a round
+//! (`Tracer.names = false`, `--trace-names off`, turns it off).
+//!
 //! Locking: `Tracer.mutex` guards the session table; each `Session.mutex`
 //! guards that session's snapshot. A session's own thread owns its socket.
 
@@ -21,6 +25,7 @@ const std = @import("std");
 const Io = std.Io;
 const traceroute = @import("traceroute");
 const netaddr = @import("netaddr");
+const dns = @import("dns");
 const resolve = @import("monitor.zig").resolve;
 
 const log = std.log.scoped(.trace);
@@ -35,6 +40,13 @@ pub const idle_s = 30;
 pub const max_age_s = 10 * 60;
 /// Upper bound of `--trace-max`.
 pub const max_slots = 16;
+/// Hop addresses a session looks up a name for: every responder of every hop.
+const max_names = max_hops * traceroute.max_mtr_addresses;
+/// A PTR lookup gets one try of this long per server: a name is a nicety,
+/// and the next address waits behind it.
+const name_timeout_ms = 1000;
+/// How often the lookup task checks for new addresses.
+const name_poll_ms = 250;
 
 const mtr_options: traceroute.MtrOptions = .{
     .max_hops = max_hops,
@@ -49,6 +61,8 @@ pub const Tracer = struct {
     gpa: std.mem.Allocator,
     io: Io,
     max_sessions: u8 = 4,
+    /// Look up hop names (reverse DNS).
+    names: bool = true,
     mutex: Io.Mutex = .init,
     slots: [max_slots]?*Session = @splat(null),
 
@@ -158,6 +172,19 @@ const Hop = struct {
     }
 };
 
+/// The reverse-DNS name of one hop address.
+const Name = struct {
+    ip: netaddr.Ip,
+    state: enum { pending, done } = .pending,
+    len: u8 = 0,
+    buf: [dns.message.max_name_text_len]u8 = undefined,
+
+    /// The name, or null while pending or when the address has none.
+    fn get(n: *const Name) ?[]const u8 {
+        return if (n.len == 0) null else n.buf[0..n.len];
+    }
+};
+
 const Session = struct {
     tracer: *Tracer,
     id: u32,
@@ -177,9 +204,16 @@ const Session = struct {
     reached: bool = false,
     hops: [max_hops]Hop = undefined,
     hop_n: usize = 0,
+    /// Hop addresses seen so far and their names; entries are only appended.
+    names: [max_names]Name = undefined,
+    name_n: usize = 0,
 
     fn run(s: *Session) void {
         const io = s.tracer.io;
+        // The names task lives as long as the trace: started here, canceled
+        // below, so `Tracer.release` only ever waits for this thread.
+        var names: ?Io.Future(void) = if (s.tracer.names) io.concurrent(lookupNames, .{s}) catch null else null;
+        defer if (names) |*f| f.cancel(io);
         const reason = s.trace() catch |err| blk: {
             log.info("trace of target {d} ({s}) failed: {t}", .{ s.id, s.host, err });
             break :blk switch (err) {
@@ -229,10 +263,64 @@ const Session = struct {
             if (i >= s.hop_n or hops[i].sent < s.hops[i].stats.sent) s.hops[i] = .{ .stats = hops[i] };
             s.hops[i].stats = hops[i];
             s.hops[i].push(last[i].rtt_ns);
+            if (hops[i].address) |a| s.noteAddress(a);
+            for (hops[i].addressList()) |a| s.noteAddress(a);
         }
         s.hop_n = n;
         s.rounds = m.rounds;
         s.reached = m.reached();
+    }
+
+    /// Queues `a` for a name lookup unless it is known. Under `mutex`.
+    fn noteAddress(s: *Session, a: netaddr.Ip) void {
+        for (s.names[0..s.name_n]) |*n| if (n.ip.eql(a)) return;
+        if (s.name_n == max_names) return;
+        s.names[s.name_n] = .{ .ip = a };
+        s.name_n += 1;
+    }
+
+    /// The name of `a`, if looked up and found. Under `mutex`.
+    fn nameOf(s: *const Session, a: netaddr.Ip) ?[]const u8 {
+        for (s.names[0..s.name_n]) |*n| if (n.ip.eql(a)) return n.get();
+        return null;
+    }
+
+    /// The names task: looks up queued addresses one at a time until the
+    /// trace cancels it.
+    fn lookupNames(s: *Session) void {
+        const io = s.tracer.io;
+        var resolver = dns.Resolver.init(io, s.tracer.gpa, .{ .timeout_ms = name_timeout_ms, .attempts = 1 });
+        defer resolver.deinit();
+        while (true) {
+            const next: ?struct { usize, netaddr.Ip } = blk: {
+                s.mutex.lockUncancelable(io);
+                defer s.mutex.unlock(io);
+                for (s.names[0..s.name_n], 0..) |*n, i| if (n.state == .pending) break :blk .{ i, n.ip };
+                break :blk null;
+            };
+            const i, const ip = next orelse {
+                io.sleep(.fromMilliseconds(name_poll_ms), .awake) catch return;
+                continue;
+            };
+            // Any failure (timeout, no server) leaves the address nameless;
+            // it is not retried, the plain address is what mtr shows too.
+            const found: ?[]const []const u8 = resolver.reverse(ip) catch |err| switch (err) {
+                error.Canceled => return,
+                else => null,
+            };
+            defer if (found) |f| resolver.freeNames(f);
+            s.mutex.lockUncancelable(io);
+            defer s.mutex.unlock(io);
+            const n = &s.names[i];
+            n.state = .done;
+            if (found) |f| if (f.len > 0) {
+                // PTR targets come back with or without the root dot.
+                const name = std.mem.trimEnd(u8, f[0], ".");
+                const len = @min(name.len, n.buf.len);
+                @memcpy(n.buf[0..len], name[0..len]);
+                n.len = @intCast(len);
+            };
+        }
     }
 
     fn writeJson(s: *Session, w: *Io.Writer, now: i64) Io.Writer.Error!void {
@@ -268,6 +356,12 @@ const Session = struct {
             // The most recent responder first.
             if (st.address) |a| try writeIp(&j, a);
             for (st.addressList()) |a| if (st.address == null or !a.eql(st.address.?)) try writeIp(&j, a);
+            try j.endArray();
+            // names[k] is the reverse-DNS name of hosts[k], null if none (yet).
+            try j.objectField("names");
+            try j.beginArray();
+            if (st.address) |a| try j.write(s.nameOf(a));
+            for (st.addressList()) |a| if (st.address == null or !a.eql(st.address.?)) try j.write(s.nameOf(a));
             try j.endArray();
             try j.objectField("sent");
             try j.write(st.sent);
@@ -340,10 +434,17 @@ test "snapshot JSON: hops, responders first, microseconds" {
     s.hops[0].push(null);
     s.hops[0].push(1_500_000);
     s.hop_n = 1;
+    s.noteAddress(.{ .v4 = .{ 10, 0, 0, 2 } });
+    s.noteAddress(.{ .v4 = .{ 10, 0, 0, 1 } });
+    s.noteAddress(.{ .v4 = .{ 10, 0, 0, 2 } }); // known: not queued twice
+    try testing.expectEqual(@as(usize, 2), s.name_n);
+    s.names[0].state = .done;
+    @memcpy(s.names[0].buf[0..10], "gw.example");
+    s.names[0].len = 10;
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try s.writeJson(&out.writer, 130);
     try testing.expectEqualStrings(
-        \\{"state":"running","reason":"running","address":"192.0.2.1","unprivileged":false,"rounds":2,"reached":false,"age":30,"max_age":600,"hops":[{"ttl":1,"hosts":["10.0.0.2","10.0.0.1"],"sent":2,"recv":1,"loss":500,"last":1500,"avg":1500,"best":1500,"worst":1500,"jitter":null,"code":null,"spark":[null,1500]}]}
+        \\{"state":"running","reason":"running","address":"192.0.2.1","unprivileged":false,"rounds":2,"reached":false,"age":30,"max_age":600,"hops":[{"ttl":1,"hosts":["10.0.0.2","10.0.0.1"],"names":["gw.example",null],"sent":2,"recv":1,"loss":500,"last":1500,"avg":1500,"best":1500,"worst":1500,"jitter":null,"code":null,"spark":[null,1500]}]}
     , out.written());
 }

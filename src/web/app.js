@@ -617,7 +617,15 @@ function renderTrace(panel, t) {
   for (const h of d ? d.hops : []) {
     const row = el("tr");
     const host = el("td", "hop-host");
-    if (h.hosts.length) host.append(...h.hosts.map((a) => el("span", null, a)));
+    if (h.hosts.length)
+      host.append(
+        ...h.hosts.map((a, i) => {
+          const name = h.names?.[i];
+          const s = el("span", null, name ? `${name} (${a})` : a);
+          if (name) s.title = a;
+          return s;
+        }),
+      );
     else host.append(el("span", "muted", "no answer"));
     const loss = el("td", h.loss >= 10 ? "num bad" : "num", h.sent ? `${(h.loss / 10).toFixed(h.loss % 10 ? 1 : 0)} %` : "–");
     if (h.code !== null) loss.title = `Destination Unreachable, code ${h.code}`;

@@ -15,13 +15,16 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
 
-    const zig_libs = b.dependency("zig_libs", .{ .target = target, .optimize = optimize });
+    // No DNS over HTTPS: trace hop names use the system resolver, and the
+    // http/TLS stack DoH needs would triple the binary.
+    const zig_libs = b.dependency("zig_libs", .{ .target = target, .optimize = optimize, .@"dns-doh" = false });
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .strip = strip,
         .imports = &.{
+            .{ .name = "dns", .module = zig_libs.module("dns") },
             .{ .name = "icmp", .module = zig_libs.module("icmp") },
             .{ .name = "netaddr", .module = zig_libs.module("netaddr") },
             .{ .name = "traceroute", .module = zig_libs.module("traceroute") },
