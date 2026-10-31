@@ -119,9 +119,8 @@ pub const Monitor = struct {
     /// Bumped on every change the web page would show; with the cycle start
     /// it identifies one `stateJson` result (see `StateTag`).
     version: u64 = 0,
-    /// The last `stateJson` result and its tag, shared by every viewer.
-    state_cache: std.ArrayList(u8) = .empty,
-    cache_tag: ?StateTag = null,
+    /// The last `state` result, shared by every viewer (holds one reference).
+    snapshot: ?*Snapshot = null,
     /// For `health()`, read without the lock: when `loop` started, when the
     /// last cycle finished (0: none yet), and whether its probing worked.
     started_at: std.atomic.Value(i64) = .init(0),
@@ -131,7 +130,7 @@ pub const Monitor = struct {
     pub fn deinit(m: *Monitor) void {
         for (m.targets.items) |t| m.freeTarget(t);
         m.targets.deinit(m.gpa);
-        m.state_cache.deinit(m.gpa);
+        if (m.snapshot) |snap| snap.release();
     }
 
     fn freeTarget(m: *Monitor, t: *Target) void {
@@ -187,7 +186,7 @@ pub const Monitor = struct {
         errdefer freeTags(m.gpa, tags_copy);
         t.* = .{ .id = id, .name = name_copy, .host = host_copy, .tags = tags_copy };
         try m.targets.append(m.gpa, t);
-        m.next_id = @max(m.next_id, id + 1);
+        m.next_id = @max(m.next_id, id +| 1);
         return id;
     }
 
@@ -295,7 +294,9 @@ pub const Monitor = struct {
             m.runCycle(start);
             const after = Io.Clock.real.now(m.io).toSeconds();
             m.cycle_done_at.store(after, .monotonic);
-            try m.io.sleep(.fromSeconds(@max(1, start + m.cycle_s - after)), .awake);
+            // Clamped both ways: a wall clock stepped back during the cycle
+            // must not put probing to sleep for that long.
+            try m.io.sleep(.fromSeconds(std.math.clamp(start + m.cycle_s - after, 1, m.cycle_s)), .awake);
         }
     }
 
@@ -417,7 +418,7 @@ pub const Monitor = struct {
             var at = live_from;
             while (at <= t) : (at += m.cycle_s) {
                 const s = target.history[m.slot(at)];
-                if (s.t == at and s.recv > 0) {
+                if (s.t == at and s.recv > 0 and n < real.len) {
                     real[n] = s.rtt_us;
                     n += 1;
                 }
@@ -505,7 +506,7 @@ pub const Monitor = struct {
 
     pub fn loadHistory(m: *Monitor) !void {
         const path = m.history_path orelse return;
-        const bytes = Io.Dir.cwd().readFileAlloc(m.io, path, m.gpa, .limited(64 << 20)) catch |err| switch (err) {
+        const bytes = Io.Dir.cwd().readFileAlloc(m.io, path, m.gpa, .limited(8 << 20)) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return err,
         };
@@ -535,10 +536,10 @@ pub const Monitor = struct {
                 if (s[0] <= oldest) continue;
                 const sample: Sample = .{
                     .t = s[0],
-                    .sent = std.math.cast(u8, s[1]) orelse continue,
-                    .recv = std.math.cast(u8, s[2]) orelse continue,
-                    .rtt_us = std.math.cast(u32, s[3]) orelse continue,
-                    .jitter_us = if (s.len == 5) std.math.cast(u32, s[4]) orelse continue else 0,
+                    .sent = fileValue(u8, s[1], probes_per_cycle) orelse continue,
+                    .recv = fileValue(u8, s[2], probes_per_cycle) orelse continue,
+                    .rtt_us = fileValue(u32, s[3], max_file_rtt_us) orelse continue,
+                    .jitter_us = if (s.len == 5) fileValue(u32, s[4], max_file_rtt_us) orelse continue else 0,
                 };
                 // writeSeries computes `sent - recv`.
                 if (sample.sent > probes_per_cycle or sample.recv > sample.sent) continue;
@@ -588,23 +589,48 @@ pub const Monitor = struct {
         return .{ .version = m.version, .end = now - @mod(now, m.cycle_s) };
     }
 
-    /// Everything the page shows, as JSON (see `writeStateLocked`), copied
-    /// into `arena`. Built once per tag and then served from `state_cache`,
-    /// so any number of viewers costs one serialization per change.
-    pub fn stateJson(m: *Monitor, arena: std.mem.Allocator) error{OutOfMemory}!struct { tag: StateTag, json: []u8 } {
+    /// Everything the page shows, as JSON (see `writeStateLocked`): a
+    /// reference to the current snapshot, `release` it when sent. Built once
+    /// per tag and shared, never copied per request, so any number of
+    /// viewers costs one serialization per change, and slow readers hold at
+    /// most the few snapshots made while they read (not one copy each: 256
+    /// slow readers of a 64-target state were 256 x 1.4 MB).
+    pub fn state(m: *Monitor) error{OutOfMemory}!*Snapshot {
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
         const tag = m.stateTagLocked();
-        if (!std.meta.eql(m.cache_tag, tag)) {
-            m.cache_tag = null;
-            m.state_cache.clearRetainingCapacity();
-            var aw: Io.Writer.Allocating = .fromArrayList(m.gpa, &m.state_cache);
-            defer m.state_cache = aw.toArrayList();
+        const current = m.snapshot;
+        if (current == null or !std.meta.eql(current.?.tag, tag)) {
+            var aw: Io.Writer.Allocating = .init(m.gpa);
+            defer aw.deinit();
             m.writeStateLocked(&aw.writer, tag.end) catch return error.OutOfMemory;
-            m.cache_tag = tag;
+            const snap = try m.gpa.create(Snapshot);
+            snap.* = .{ .gpa = m.gpa, .tag = tag, .json = &.{} };
+            snap.json = aw.toOwnedSlice() catch {
+                m.gpa.destroy(snap);
+                return error.OutOfMemory;
+            };
+            if (current) |old| old.release();
+            m.snapshot = snap;
         }
-        return .{ .tag = tag, .json = try arena.dupe(u8, m.state_cache.items) };
+        const snap = m.snapshot.?;
+        _ = snap.refs.fetchAdd(1, .monotonic);
+        return snap;
     }
+
+    /// One `state` result: immutable, freed with its last reference.
+    pub const Snapshot = struct {
+        gpa: std.mem.Allocator,
+        refs: std.atomic.Value(u32) = .init(1),
+        tag: StateTag,
+        json: []u8,
+
+        pub fn release(snap: *Snapshot) void {
+            if (snap.refs.fetchSub(1, .acq_rel) != 1) return;
+            snap.gpa.free(snap.json);
+            snap.gpa.destroy(snap);
+        }
+    };
 
     /// Per target, `rtt` (ms), `jitter` (ms) and `loss` (%) hold one entry per cycle of the
     /// last 24 hours, oldest first, the newest at cycle start `newest`;
@@ -723,6 +749,26 @@ fn freeTags(gpa: std.mem.Allocator, tags: [][]u8) void {
 fn validateName(name: []const u8) Error!void {
     if (name.len == 0 or name.len > 64) return error.InvalidName;
     for (name) |c| if (c < 0x20 or c == 0x7f) return error.InvalidName;
+}
+
+/// A round-trip time (or jitter) a history file may hold: a probe waits
+/// far less; anything above is a damaged file, dropped like one.
+const max_file_rtt_us = 60 * std.time.us_per_s;
+
+/// `v` from the history file as a `T` no larger than `max`, or null.
+/// Range-checked as i64 first, then narrowed from u64: Zig 0.17's optimized
+/// builds miscompile a signed-to-narrower-unsigned `math.cast` (#37131).
+fn fileValue(comptime T: type, v: i64, max: u32) ?T {
+    if (v < 0 or v > max) return null;
+    return @intCast(@as(u64, @bitCast(v)));
+}
+
+test "history file values: range-checked, never wrapped" {
+    try testing.expectEqual(@as(?u8, 5), fileValue(u8, 5, probes_per_cycle));
+    for ([_]i64{ -1, 6, 256, std.math.minInt(i64), std.math.maxInt(i64) }) |v|
+        try testing.expectEqual(@as(?u8, null), fileValue(u8, v, probes_per_cycle));
+    try testing.expectEqual(@as(?u32, null), fileValue(u32, std.math.maxInt(u32), max_file_rtt_us));
+    try testing.expectEqual(@as(?u32, 59_000_000), fileValue(u32, 59_000_000, max_file_rtt_us));
 }
 
 /// A numeric address, or a host name valid for DNS.
@@ -890,21 +936,23 @@ test "the state is built once per change and shared" {
     var m = testMonitor();
     defer m.deinit();
     m.cycle_s = 1 << 30; // no cycle boundary (which changes the tag) during the test
-    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
     const id = try m.add("a", "192.0.2.1", &.{});
-    const first = try m.stateJson(arena);
+    const first = try m.state();
     try testing.expectEqual(first.tag, m.stateTag());
+    // The same tag: the same snapshot, shared, not rebuilt.
+    const again = try m.state();
+    try testing.expectEqual(first, again);
+    again.release();
     try m.apply(id, .pause);
     try testing.expect(m.stateTag().version != first.tag.version);
-    // Rebuilt from the cache only when the tag changed: corrupt the cache to see.
-    m.state_cache.items[0] = 'X';
-    const second = try m.stateJson(arena);
+    const second = try m.state();
+    defer second.release();
+    try testing.expect(second != first);
     try testing.expect(std.mem.find(u8, second.json, "\"paused\":true") != null);
-    try testing.expectEqual('{', second.json[0]);
-    m.state_cache.items[0] = 'X';
-    try testing.expectEqual('X', (try m.stateJson(arena)).json[0]);
+    // A reader still holding the old snapshot reads it intact; its last
+    // release frees it (the testing allocator reports a leak otherwise).
+    try testing.expect(std.mem.find(u8, first.json, "\"paused\":false") != null);
+    first.release();
 }
 
 test "health: cycles must keep finishing and probing must work" {
@@ -1062,9 +1110,8 @@ test "tags: validated, normalized, saved, loaded and served" {
     try testing.expectEqual(0, m2.targets.items[1].tags.len);
 
     // Served in the state, an empty list included.
-    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena_state.deinit();
-    const state = try m2.stateJson(arena_state.allocator());
+    const state = try m2.state();
+    defer state.release();
     try testing.expect(std.mem.find(u8, state.json, "\"tags\":[\"ipv6\",\"core\"]") != null);
     try testing.expect(std.mem.find(u8, state.json, "\"tags\":[]") != null);
 

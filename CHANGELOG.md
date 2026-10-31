@@ -6,6 +6,17 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
+- **Robustness (independent review):** stopping a trace no longer waits,
+  under the tracer's lock, for a session stuck in a slow DNS lookup (every
+  trace request used to stall for the resolver timeout); a viewer refused
+  for its limit no longer keeps a trace alive; the state is one shared,
+  reference-counted snapshot instead of a copy per request; history values
+  are range-checked (an RTT over 60 s or a corrupt count is dropped, never
+  wrapped, never a crash in `--demo`), the file is limited to 8 MiB; a
+  target id of 4294967295 no longer crashes the start; `accept` errors back
+  off 100 ms instead of spinning; a wall clock stepped back no longer puts
+  probing to sleep. A thin rule separates the live trace from the
+  statistics above it.
 - **Trace: copy, limits, width.** A Copy button puts the trace table on the
   clipboard as text (`mtr --report` style); a click on a hop's address
   copies the address alone; a text selection in the table pauses its

@@ -135,7 +135,10 @@ pub fn main(init: std.process.Init) !void {
     try tasks.concurrent(io, Connections.reap, .{ &connections, io });
     while (true) {
         const stream = server.accept(io) catch |err| {
+            // Out of descriptors or memory: wait for connections to close
+            // instead of spinning on the error.
             log.warn("accept: {t}", .{err});
+            io.sleep(.fromMilliseconds(100), .awake) catch return;
             continue;
         };
         const slot = connections.acquire(io, stream) orelse {
@@ -548,7 +551,9 @@ fn sendState(monitor: *Monitor, req: *http.Server.Request, arena: std.mem.Alloca
     const current = etagOf(&buf, monitor.stateTag());
     if (ifNoneMatch(req, current))
         return respond(req, "", .{ .status = .not_modified, .cache_control = "no-cache", .etag = current });
-    const state = try monitor.stateJson(arena);
+    _ = arena;
+    const state = try monitor.state();
+    defer state.release();
     return respond(req, state.json, .{
         .content_type = "application/json",
         .cache_control = "no-cache",

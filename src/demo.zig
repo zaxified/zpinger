@@ -78,7 +78,8 @@ pub fn probes(s: Scenario, id: u32, t: i64, base_ms: f64, live_from: i64, out: [
         var ms = d.base + @abs(r.floatNorm(f64)) * d.spread;
         if (r.float(f64) < d.spike_p) ms += (0.3 + 0.7 * r.float(f64)) * d.spike;
         if (r.float(f64) < d.loss) continue;
-        out[n] = @intFromFloat(@max(0.02, ms) * 1000);
+        // Saturated: `base` comes from the history file, which may be corrupt.
+        out[n] = @intFromFloat(std.math.clamp(ms * 1000, 20, std.math.maxInt(u32)));
         n += 1;
     }
     return n;

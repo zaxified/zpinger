@@ -109,6 +109,10 @@ pub const Tracer = struct {
     /// One session per host: every viewer of that host, through any target,
     /// reads the same measurement.
     slots: [max_slots]?*Session = @splat(null),
+    /// Sessions told to stop whose thread has not ended yet (it may sit in
+    /// a DNS lookup for seconds); freed by `reap` once it has. Waiting for
+    /// such a thread under `mutex` would hold up every trace request.
+    dying: [max_slots]?*Session = @splat(null),
     watches: [max_watches]?Watch = @splat(null),
     /// The probing engines, IPv4 and IPv6.
     engines: [2]Engine = .{ .{ .family = .v4 }, .{ .family = .v6 } },
@@ -127,6 +131,10 @@ pub const Tracer = struct {
             t.release(s);
             slot.* = null;
         };
+        for (&t.dying) |*d| if (d.*) |s| {
+            t.release(s);
+            d.* = null;
+        };
         for (&t.engines) |*e| e.wait(t.io);
     }
 
@@ -137,6 +145,7 @@ pub const Tracer = struct {
         t.mutex.lockUncancelable(t.io);
         defer t.mutex.unlock(t.io);
         const now = t.clock();
+        t.reap();
         t.expireWatches(now);
         if (t.running(host)) |s| return t.watch(viewer, s, now);
 
@@ -177,6 +186,7 @@ pub const Tracer = struct {
     pub fn stop(t: *Tracer, host: []const u8, viewer: Viewer) void {
         t.mutex.lockUncancelable(t.io);
         defer t.mutex.unlock(t.io);
+        t.reap();
         t.expireWatches(t.clock());
         const s = t.running(host) orelse return;
         var others = false;
@@ -185,7 +195,7 @@ pub const Tracer = struct {
         };
         if (others) return;
         for (&t.slots) |*slot| if (slot.* == s) {
-            t.drop(s);
+            t.retire(s);
             slot.* = null;
         };
     }
@@ -197,6 +207,7 @@ pub const Tracer = struct {
         t.mutex.lockUncancelable(t.io);
         defer t.mutex.unlock(t.io);
         const now = t.clock();
+        t.reap();
         t.expireWatches(now);
         const s = t.running(host) orelse t.session(host) orelse return null;
         if (!s.finished.load(.acquire)) try t.watch(viewer, s, now);
@@ -229,15 +240,17 @@ pub const Tracer = struct {
     }
 
     /// Records (or refreshes) that `viewer` watches `s`. Under `mutex`.
+    /// Only an accepted watch keeps the session alive.
     fn watch(t: *Tracer, viewer: Viewer, s: *Session, now: i64) error{ ViewerLimit, TooManyTraces }!void {
-        s.last_poll.store(now, .monotonic);
         for (&t.watches) |*w| if (w.*) |*x| if (x.session == s and std.mem.eql(u8, &x.viewer, &viewer)) {
             x.last_poll = now;
+            s.last_poll.store(now, .monotonic);
             return;
         };
         if (t.watchCount(viewer) >= max_per_viewer) return error.ViewerLimit;
         const i = t.freeWatch() orelse return error.TooManyTraces;
         t.watches[i] = .{ .viewer = viewer, .session = s, .last_poll = now };
+        s.last_poll.store(now, .monotonic);
     }
 
     fn watchCount(t: *const Tracer, viewer: Viewer) usize {
@@ -260,7 +273,32 @@ pub const Tracer = struct {
         };
     }
 
-    /// Stops `s`, forgets its watches and frees it. Under `mutex`.
+    /// Tells a running `s` to stop and forgets its watches; it is freed
+    /// by `reap` once its thread has ended, never waited for here. A full
+    /// `dying` list (16 sessions stuck at once) falls back to waiting.
+    /// Under `mutex`.
+    fn retire(t: *Tracer, s: *Session) void {
+        for (&t.watches) |*w| if (w.*) |x| if (x.session == s) {
+            w.* = null;
+        };
+        s.stop.store(true, .monotonic);
+        for (&t.dying) |*d| if (d.* == null) {
+            d.* = s;
+            return;
+        };
+        t.release(s);
+    }
+
+    /// Frees the stopped sessions whose thread has ended. Under `mutex`.
+    fn reap(t: *Tracer) void {
+        for (&t.dying) |*d| if (d.*) |s| if (s.finished.load(.acquire)) {
+            t.release(s);
+            d.* = null;
+        };
+    }
+
+    /// Stops `s`, forgets its watches and frees it: only for a finished
+    /// session, whose thread has (all but) ended. Under `mutex`.
     fn drop(t: *Tracer, s: *Session) void {
         for (&t.watches) |*w| if (w.*) |x| if (x.session == s) {
             w.* = null;
@@ -748,6 +786,36 @@ test "stop: the session ends only when its last viewer leaves" {
     try testing.expectEqual(@as(usize, 0), t.watchCount(viewer_a));
     t.stop("h", viewer_b);
     try testing.expect(t.session("h") == null);
+}
+
+test "stop never waits for a session stuck in its thread; reap frees it once it ended" {
+    var t: Tracer = .{ .gpa = testing.allocator, .io = testing.io };
+    defer t.deinit();
+    const now = t.clock();
+    // A session whose thread has not finished (as one blocked in DNS).
+    const s = try idleSession(&t, "stuck", now);
+    try t.watch(viewer_a, s, now);
+    t.stop("stuck", viewer_a); // must return at once
+    try testing.expect(t.session("stuck") == null);
+    try testing.expect(s.stop.load(.monotonic));
+    try testing.expectEqual(@as(?*Session, s), t.dying[0]);
+    t.reap(); // still running: kept
+    try testing.expectEqual(@as(?*Session, s), t.dying[0]);
+    s.finished.store(true, .release);
+    t.reap(); // ended: freed (the testing allocator would report it otherwise)
+    try testing.expectEqual(@as(?*Session, null), t.dying[0]);
+}
+
+test "a refused viewer does not keep a session alive" {
+    var t: Tracer = .{ .gpa = testing.allocator, .io = testing.io };
+    defer t.deinit();
+    const s1 = try idleSession(&t, "h1", 0);
+    const s2 = try idleSession(&t, "h2", 0);
+    const s3 = try idleSession(&t, "h3", 0);
+    try t.watch(viewer_a, s1, 0);
+    try t.watch(viewer_a, s2, 0);
+    try testing.expectError(error.ViewerLimit, t.watch(viewer_a, s3, 50));
+    try testing.expectEqual(@as(i64, 0), s3.last_poll.load(.monotonic));
 }
 
 test "at most max_starts_per_min new sessions a minute" {
