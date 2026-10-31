@@ -1,6 +1,6 @@
 # zpinger
 
-A small ping monitor built on the `zig_fping` library: a daemon that pings a
+A small ping monitor built on [zig-libs](https://github.com/zaxified/zig-libs): a daemon that pings a
 handful of targets once a minute and serves a web page with the last 24 hours.
 
 ![zpinger: eleven targets with status, recent cycles and uptime; one row expanded to its 24-hour latency chart](doc/screenshot.png)
@@ -47,14 +47,14 @@ and is kept small enough to read in one sitting:
 `src/monitor.zig` (targets, probing, history, persistence), `src/main.zig`
 (HTTP server and API), `src/web/` (the page; no framework and no build step,
 embedded into the binary). Nothing beyond Zig's standard library and
-`zig_fping`. It ships as a Debian package with a sandboxed systemd service
+zig-libs (`icmp`). It ships as a Debian package with a sandboxed systemd service
 ([Deploying](#deploying)).
 
 ## Build and run
 
-Needs Zig 0.17.0 (`.zigversion`). The zig-fping library is a package
-dependency pinned to a release tag in `build.zig.zon`; build against a local
-checkout with `zig build --fork=../zig-fping`:
+Needs Zig 0.17.0 (`.zigversion`). zig-libs is a package dependency pinned
+to a commit in `build.zig.zon`; build against a local checkout with
+`zig build --fork=../zig-libs`:
 
 ```sh
 zig build                     # ReleaseSafe by default
@@ -386,7 +386,5 @@ runs; a `v*` tag runs it too and publishes the packages as a GitHub release.
 
 ## License
 
-MIT ([LICENSE](LICENSE)). The zig-fping library linked into the binary is
-under the fping licence (BSD-style): this product includes software
-developed by Stanford University. The package's `copyright` file carries
-both texts.
+MIT ([LICENSE](LICENSE)). zig-libs, linked into the binary, is MIT too; the
+package's `copyright` file carries both notices.

@@ -6,6 +6,9 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
+- **Pings through zig-libs** (`icmp.Pinger`, the same fping-style paced
+  engine) instead of zig-fping; the package's `copyright` carries the
+  zig-libs MIT notice. A raw-socket fallback draws a random ICMP ident.
 - **Renamed to zpinger**, licensed MIT. Binary, package, service,
   `/etc/zpinger/env`, `/var/lib/zpinger/` and the `ZPINGER_*` variables
   replace their `fping-watch` names; the package conflicts with

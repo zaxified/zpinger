@@ -46,11 +46,11 @@ for pair in x86_64-linux:amd64 aarch64-linux:arm64; do
     # The about page for a demo hub: /usr/share/zpinger/about/.
     "$ZIG" build about --prefix "$stage/usr/share/zpinger"
     install -D -m 0644 README.md "$stage/usr/share/doc/zpinger/README.md"
-    # The binary links zig-fping in, whose (fping) licence must travel with
-    # it: the pinned package's LICENSE, from the hash in build.zig.zon.
-    fping_license=$HERE/zig-pkg/$(sed -n 's/^ *\.hash = "\(zig_fping-.*\)",$/\1/p' build.zig.zon)/LICENSE
-    [ -f "$fping_license" ] || { echo "package.sh: no $fping_license" >&2; exit 1; }
-    { cat "$HERE/LICENSE"; printf '\n%s\n\n' '---------------------------------------------------------------------- zig-fping (linked in):'; cat "$fping_license"; } \
+    # The binary links zig-libs in (MIT, whose notice travels with copies):
+    # the pinned package's LICENSE, from the hash in build.zig.zon.
+    libs_license=$HERE/zig-pkg/$(sed -n 's/^ *\.hash = "\(zig_libs-.*\)",$/\1/p' build.zig.zon)/LICENSE
+    [ -f "$libs_license" ] || { echo "package.sh: no $libs_license" >&2; exit 1; }
+    { cat "$HERE/LICENSE"; printf '\n%s\n\n' '---------------------------------------------------------------------- zig-libs (linked in):'; cat "$libs_license"; } \
         > "$stage/copyright"
     install -D -m 0644 "$stage/copyright" "$stage/usr/share/doc/zpinger/copyright"
     rm "$stage/copyright"
@@ -74,7 +74,7 @@ Description: ping monitor with a web page
  24 hours of status, latency and packet loss, on 127.0.0.1:8080. Targets are
  added, paused and acknowledged in the page; ZPINGER_OPTS=--read-only in
  /etc/zpinger/env turns it into a public demo for a reverse proxy.
- Built on zig-fping; one static binary.
+ Built on zig-libs; one static binary.
 EOF
     dpkg-deb --root-owner-group -Zxz --build "$stage" "$deb" >/dev/null
 done

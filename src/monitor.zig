@@ -2,7 +2,7 @@
 //! 24 hours of results per target.
 //!
 //! Every cycle sends a few echo requests to each active target through one
-//! `zig_fping.Pinger` (so global pacing and in-flight limits apply across all
+//! zig-libs `icmp.Pinger` (so global pacing and in-flight limits apply across all
 //! targets) and stores one `Sample` per target: probes sent, replies received,
 //! the median round-trip time and the jitter.
 //!
@@ -12,7 +12,7 @@
 
 const std = @import("std");
 const Io = std.Io;
-const fping = @import("zig_fping");
+const icmp = @import("icmp");
 const demo = @import("demo.zig");
 
 const log = std.log.scoped(.monitor);
@@ -717,7 +717,7 @@ fn validateName(name: []const u8) Error!void {
 
 /// A numeric address, or a host name valid for DNS.
 fn validateHost(host: []const u8) Error!void {
-    if (fping.Addr.parse(host)) |_| return else |_| {}
+    if (icmp.Addr.parse(host)) |_| return else |_| {}
     _ = Io.net.HostName.init(host) catch return error.InvalidHost;
 }
 
@@ -733,18 +733,18 @@ fn writeFileAtomic(io: Io, path: []const u8, data: []const u8) !void {
 }
 
 /// First address of `host`; numeric addresses skip DNS.
-fn resolve(io: Io, host: []const u8) !fping.Addr {
-    if (fping.Addr.parse(host)) |addr| return addr else |_| {}
+fn resolve(io: Io, host: []const u8) !icmp.Addr {
+    if (icmp.Addr.parse(host)) |addr| return addr else |_| {}
     const HostName = Io.net.HostName;
     var buf: [16]HostName.LookupResult = undefined;
     var queue: Io.Queue(HostName.LookupResult) = .init(&buf);
     // lookup() blocks while the queue is full, so drain it concurrently.
     var future = try io.concurrent(HostName.lookup, .{ try HostName.init(host), io, &queue, .{ .port = 0 } });
     defer _ = future.cancel(io) catch {};
-    var found: ?fping.Addr = null;
+    var found: ?icmp.Addr = null;
     while (queue.getOne(io)) |result| switch (result) {
         .address => |ip| {
-            if (found == null) found = fping.Addr.fromIpAddress(ip);
+            if (found == null) found = icmp.Addr.fromIp(.fromStd(ip));
         },
         .canonical_name => {},
     } else |_| {}
@@ -756,7 +756,7 @@ fn resolve(io: Io, host: []const u8) !fping.Addr {
 const Job = struct {
     id: u32,
     host: []const u8,
-    addr: ?fping.Addr = null,
+    addr: ?icmp.Addr = null,
     err: ?[]const u8 = null,
     rtts: [probes_per_cycle]u32 = undefined,
     replies: u8 = 0,
@@ -765,7 +765,7 @@ const Job = struct {
 
 /// Ping every job that has an address, `probes_per_cycle` times, in one round.
 fn probe(gpa: std.mem.Allocator, jobs: []Job) !void {
-    var pinger = try fping.Pinger.init(gpa, .{
+    var pinger = try icmp.Pinger.init(gpa, .{
         .mode = .count,
         .count = probes_per_cycle,
         // Spread the probes: 20 ms between any two packets, 1 s between
@@ -775,8 +775,6 @@ fn probe(gpa: std.mem.Allocator, jobs: []Job) !void {
         .perhost_interval_ns = std.time.ns_per_s,
         .timeout_ns = std.time.ns_per_s,
         .jitter_ns = 500 * std.time.ns_per_ms,
-        // Several Pinger instances in one process must not share replies.
-        .raw_ident = .unique,
     });
     defer pinger.deinit();
 
@@ -792,7 +790,7 @@ fn probe(gpa: std.mem.Allocator, jobs: []Job) !void {
     if (n == 0) return;
 
     const Collect = struct {
-        fn onResult(ctx: ?*anyopaque, id: fping.TargetId, _: u16, outcome: fping.Outcome) void {
+        fn onResult(ctx: ?*anyopaque, id: icmp.TargetId, _: u16, outcome: icmp.Outcome) void {
             const map: *[max_targets]*Job = @ptrCast(@alignCast(ctx.?));
             const job = map[id];
             switch (outcome) {

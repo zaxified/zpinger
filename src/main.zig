@@ -1,4 +1,4 @@
-//! zpinger — a small ping monitor built on zig-fping.
+//! zpinger — a small ping monitor built on zig-libs.
 //!
 //! Pings a handful of targets once a minute and serves a web page with the
 //! last 24 hours: status, latency and packet loss per target, plus buttons to

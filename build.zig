@@ -1,7 +1,6 @@
 const std = @import("std");
 
-// A consumer's build.zig: zig-fping is a package dependency and its library
-// module is taken from it by name.
+// zig-libs is a package dependency; its modules are taken from it by name.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     // ReleaseSafe by default: every safety check stays on, which is what a
@@ -16,14 +15,15 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
 
-    const fping = b.dependency("zig_fping", .{ .target = target, .optimize = optimize });
+    const zig_libs = b.dependency("zig_libs", .{ .target = target, .optimize = optimize });
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .strip = strip,
         .imports = &.{
-            .{ .name = "zig_fping", .module = fping.module("zig_fping") },
+            .{ .name = "icmp", .module = zig_libs.module("icmp") },
+            .{ .name = "netaddr", .module = zig_libs.module("netaddr") },
             .{ .name = "build_options", .module = options.createModule() },
         },
     });

@@ -1,7 +1,7 @@
 {
   "id": "zpinger",
   "title": "zpinger",
-  "tagline": "A ping monitor with a 24-hour web view, built on zig-fping.",
+  "tagline": "A ping monitor with a 24-hour web view, built on zig-libs.",
   "summary": "A small daemon that pings a list of hosts once a minute and shows, per host, its status, latency and packet loss over the last 24 hours. This public instance is read-only: you see what it measures, nobody can change what it pings.",
   "features": [
     "One row per host: status, a strip of recent cycles, 24-hour uptime and current latency",
@@ -10,7 +10,7 @@
     "Paced probing: 5 echo requests per host per minute, spread out, never a burst",
     "Built for many viewers: the page reads cached results and never triggers a ping"
   ],
-  "built_with": "Zig 0.17 and zig-fping, a Zig port of fping; one static binary, no libc, no dependencies",
+  "built_with": "Zig 0.17 and zig-libs (its icmp module: fping-style paced probing); one static binary, no libc",
   "license": "MIT",
   "source": "https://github.com/zaxified/zpinger",
   "screenshot": "screenshot.png",

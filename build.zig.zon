@@ -5,11 +5,9 @@
     .fingerprint = 0x7a949a81c7030d18,
     .paths = .{ "build.zig", "build.zig.zon", "src", "tools", "deploy", "targets.json", "smoke.sh", "package.sh", "README.md", "LICENSE", "doc" },
     .dependencies = .{
-        // `?ref=` is only a note for the reader: Zig fetches the commit in
-        // the fragment, and the hash holds the pin.
-        .zig_fping = .{
-            .url = "git+https://github.com/zaxified/zig-fping?ref=v0.2.1#431fe37c09e116f2a12700516c455b6e3de40f74",
-            .hash = "zig_fping-0.2.1-cRXn2UdJBwC_lHd8NLE0ipXwa1BAp4g6Giai7vLiJwM4",
+        .zig_libs = .{
+            .url = "git+https://github.com/zaxified/zig-libs.git#15dc39ace450531b4cfd9a7258639afaf0bbb8ff",
+            .hash = "zig_libs-0.0.0-WiQ0GoJNsQj-POf7ks682EHkQ17w782vpG7kP_xd1bNK",
         },
     },
 }
