@@ -13,6 +13,7 @@ const Monitor = @import("monitor.zig").Monitor;
 const StateTag = @import("monitor.zig").StateTag;
 const Tracer = @import("trace.zig").Tracer;
 const trace = @import("trace.zig");
+const netaddr = @import("netaddr");
 
 const log = std.log.scoped(.web);
 
@@ -28,6 +29,8 @@ const usage =
     \\  --cycle SECONDS      seconds between probing cycles (default 60)
     \\  --trace-max N        live traces (target detail) running at once (default 4, 0 = off)
     \\  --trace-names on|off reverse-DNS names of the trace hops (default on)
+    \\  --trust-proxy on|off take the client address of a request from a loopback
+    \\                       peer (a reverse proxy) from X-Forwarded-For (default on)
     \\  --version            print the version and exit
     \\
 ;
@@ -85,6 +88,12 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, value, "off")) {
                 tracer_state.names = false;
             } else return fail(io, "--trace-names is on or off");
+        } else if (std.mem.eql(u8, arg, "--trust-proxy")) {
+            if (std.mem.eql(u8, value, "on")) {
+                trust_proxy = true;
+            } else if (std.mem.eql(u8, value, "off")) {
+                trust_proxy = false;
+            } else return fail(io, "--trust-proxy is on or off");
         } else return fail(io, "unknown option");
     }
 
@@ -94,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
     monitor.loadHistory() catch |err| fatal(io, "cannot load the history from {s}: {t} (move it away to start afresh)", .{ monitor.history_path.?, err });
 
     const address = Io.net.IpAddress.parseLiteral(listen_text) catch return fail(io, "bad --listen");
-    var server = address.listen(io, .{ .reuse_address = true }) catch |err|
+    var server = listenExclusive(address) catch |err|
         fatal(io, "cannot listen on {s}: {t}", .{ listen_text, err });
     defer server.deinit(io);
     log.info("zpinger {s} listening on http://{s} ({d} targets{s})", .{
@@ -121,6 +130,43 @@ pub fn main(init: std.process.Init) !void {
         tasks.concurrent(io, serve, .{ &monitor, &connections, slot, stream }) catch
             connections.release(io, slot);
     }
+}
+
+/// A listening socket with SO_REUSEADDR only. std's `listen` sets
+/// SO_REUSEPORT together with SO_REUSEADDR, and with it a second instance
+/// binds the same port and silently takes part of the requests (a trace
+/// then looks unwatched on one, missing on the other). SO_REUSEADDR is kept:
+/// this server closes its connections, and a restart must not wait out
+/// their TIME_WAIT. Linux only, like the ping sockets.
+fn listenExclusive(address: Io.net.IpAddress) error{ AddressInUse, ListenFailed }!Io.net.Server {
+    const linux = std.os.linux;
+    const rc = linux.socket(switch (address) {
+        .ip4 => linux.AF.INET,
+        .ip6 => linux.AF.INET6,
+    }, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    if (linux.errno(rc) != .SUCCESS) return error.ListenFailed;
+    const fd: linux.fd_t = @intCast(rc);
+    errdefer _ = linux.close(fd);
+    const one: c_int = 1;
+    if (linux.errno(linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, std.mem.asBytes(&one), @sizeOf(c_int))) != .SUCCESS)
+        return error.ListenFailed;
+    const bound = switch (address) {
+        .ip4 => |a| blk: {
+            const sa: linux.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, a.port), .addr = @bitCast(a.bytes) };
+            break :blk linux.bind(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in));
+        },
+        .ip6 => |a| blk: {
+            const sa: linux.sockaddr.in6 = .{ .port = std.mem.nativeToBig(u16, a.port), .flowinfo = 0, .addr = a.bytes, .scope_id = 0 };
+            break :blk linux.bind(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in6));
+        },
+    };
+    switch (linux.errno(bound)) {
+        .SUCCESS => {},
+        .ADDRINUSE => return error.AddressInUse,
+        else => return error.ListenFailed,
+    }
+    if (linux.errno(linux.listen(fd, 128)) != .SUCCESS) return error.ListenFailed;
+    return .{ .socket = .{ .handle = fd, .address = address }, .options = {} };
 }
 
 /// Limits for a server reachable from the internet. Every connection holds
@@ -246,7 +292,7 @@ fn serve(monitor: *Monitor, connections: *Connections, slot: usize, stream: Io.n
 
     var arena_state: std.heap.ArenaAllocator = .init(monitor.gpa);
     defer arena_state.deinit();
-    route(monitor, &request, arena_state.allocator()) catch |err|
+    route(monitor, &request, stream.socket.address, arena_state.allocator()) catch |err|
         log.debug("request failed: {t}", .{err});
 }
 
@@ -289,13 +335,13 @@ test "writable instance: Host header guard" {
         try std.testing.expect(!hostNameAllowed(h, allowed));
 }
 
-fn route(monitor: *Monitor, req: *http.Server.Request, arena: std.mem.Allocator) !void {
+fn route(monitor: *Monitor, req: *http.Server.Request, peer: Io.net.IpAddress, arena: std.mem.Allocator) !void {
     const method = req.head.method;
     const path = req.head.target[0 .. std.mem.findScalar(u8, req.head.target, '?') orelse req.head.target.len];
     if (!monitor.read_only and !hostAllowed(req))
         return sendError(req, .misdirected_request, "unknown host name; start the server with --allow-host NAME");
 
-    if (traceTarget(path)) |id| return routeTrace(monitor, req, id, arena);
+    if (traceTarget(path)) |id| return routeTrace(monitor, req, id, viewerOf(req, peer), arena);
 
     if (method == .GET or method == .HEAD) {
         if (std.mem.eql(u8, path, "/")) return send(req, .ok, "text/html; charset=utf-8", index_html);
@@ -374,14 +420,44 @@ fn traceTarget(path: []const u8) ?u32 {
     return std.fmt.parseInt(u32, path[prefix.len .. path.len - suffix.len], 10) catch null;
 }
 
+/// Take the client address of a request from a loopback peer (the reverse
+/// proxy) from `X-Forwarded-For` (`--trust-proxy`); set before the server starts.
+var trust_proxy = true;
+
+/// The viewer a trace request comes from: the peer address, or behind a
+/// proxy on loopback the last `X-Forwarded-For` entry, the one the proxy
+/// itself added (earlier ones come from the client and prove nothing). A
+/// peer outside loopback cannot get its header trusted.
+fn viewerOf(req: *const http.Server.Request, peer: Io.net.IpAddress) trace.Viewer {
+    const ip: netaddr.Ip = switch (peer) {
+        .ip4 => |a| .{ .v4 = a.bytes },
+        .ip6 => |a| .{ .v6 = a.bytes },
+    };
+    if (trust_proxy and ip.isLoopback()) {
+        var headers = req.iterateHeaders();
+        var last: ?[]const u8 = null;
+        while (headers.next()) |h| if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-for")) {
+            last = h.value;
+        };
+        if (last) |list| {
+            const entry = list[if (std.mem.findScalarLast(u8, list, ',')) |c| c + 1 else 0..];
+            if (netaddr.parseIp(std.mem.trim(u8, entry, " \t"))) |client| return trace.viewerOf(client);
+        }
+    }
+    return trace.viewerOf(ip);
+}
+
 /// A live trace measures, it changes nothing: a read-only instance offers it
-/// too, bounded by the Tracer (sessions per target, a global cap, idle and
-/// age limits). GET reads it (and keeps it running), POST starts it, DELETE
-/// stops it.
-fn routeTrace(monitor: *Monitor, req: *http.Server.Request, id: u32, arena: std.mem.Allocator) !void {
+/// too, bounded by the Tracer (one session per host, a global cap, a start
+/// rate, a per-viewer cap, idle and age limits). GET reads it (and keeps
+/// watching it), POST starts or joins it, DELETE stops watching it.
+fn routeTrace(monitor: *Monitor, req: *http.Server.Request, id: u32, viewer: trace.Viewer, arena: std.mem.Allocator) !void {
+    var buf: [256]u8 = undefined;
+    const host = monitor.hostOf(id, &buf) orelse return sendError(req, .not_found, "no such target");
     switch (req.head.method) {
         .GET => {
-            const body = try tracer.json(id, arena) orelse return sendError(req, .not_found, "no trace running");
+            const found = tracer.json(host, viewer, arena) catch |err| return sendTraceError(req, err);
+            const body = found orelse return sendError(req, .not_found, "no trace running");
             return send(req, .ok, "application/json", body);
         },
         .POST => {
@@ -389,20 +465,52 @@ fn routeTrace(monitor: *Monitor, req: *http.Server.Request, id: u32, arena: std.
             const content_type = req.head.content_type orelse "";
             if (!std.mem.startsWith(u8, content_type, "application/json"))
                 return sendError(req, .unsupported_media_type, "send application/json");
-            var buf: [256]u8 = undefined;
-            const host = monitor.hostOf(id, &buf) orelse return sendError(req, .not_found, "no such target");
-            tracer.start(id, host) catch |err| return switch (err) {
-                error.TraceDisabled => sendError(req, .forbidden, "live traces are disabled on this server"),
-                error.TooManyTraces => sendError(req, .service_unavailable, "too many live traces running; try again in a minute"),
-                else => err,
-            };
+            tracer.start(host, viewer) catch |err| return sendTraceError(req, err);
             return send(req, .accepted, "application/json", "{}");
         },
         .DELETE => {
-            tracer.stop(id);
+            tracer.stop(host, viewer);
             return send(req, .ok, "application/json", "{}");
         },
         else => return sendError(req, .method_not_allowed, "method not allowed"),
+    }
+}
+
+fn sendTraceError(req: *http.Server.Request, err: anyerror) !void {
+    return switch (err) {
+        error.TraceDisabled => sendError(req, .forbidden, "live traces are disabled on this server"),
+        error.TooManyTraces => sendError(req, .service_unavailable, "too many live traces running; try again in a minute"),
+        error.RateLimited => sendError(req, .too_many_requests, "too many live traces started in the last minute; try again shortly"),
+        error.ViewerLimit => sendError(req, .too_many_requests, std.fmt.comptimePrint("you are watching {d} live traces already; stop one first", .{trace.max_per_viewer})),
+        else => err,
+    };
+}
+
+test "trace viewer: X-Forwarded-For only from a loopback peer, last entry" {
+    const Case = struct { peer: []const u8, xff: ?[]const u8, want: []const u8 };
+    for ([_]Case{
+        .{ .peer = "127.0.0.1", .xff = "198.51.100.7", .want = "198.51.100.7" },
+        .{ .peer = "127.0.0.1", .xff = "203.0.113.1, 198.51.100.7", .want = "198.51.100.7" },
+        .{ .peer = "::1", .xff = "2001:db8::5", .want = "2001:db8::9" }, // same /64
+        .{ .peer = "127.0.0.1", .xff = "junk", .want = "127.0.0.1" },
+        .{ .peer = "127.0.0.1", .xff = null, .want = "127.0.0.1" },
+        .{ .peer = "192.0.2.9", .xff = "198.51.100.7", .want = "192.0.2.9" }, // not a proxy
+    }) |c| {
+        var raw_buf: [256]u8 = undefined;
+        const raw = if (c.xff) |x|
+            try std.fmt.bufPrint(&raw_buf, "GET / HTTP/1.1\r\nX-Forwarded-For: {s}\r\n\r\n", .{x})
+        else
+            "GET / HTTP/1.1\r\n\r\n";
+        var reader: Io.Reader = .fixed(raw);
+        var out: [64]u8 = undefined;
+        var writer: Io.Writer = .fixed(&out);
+        var server: http.Server = .init(&reader, &writer);
+        const req = try server.receiveHead();
+        const peer: Io.net.IpAddress = switch (netaddr.parseIp(c.peer).?) {
+            .v4 => |q| .{ .ip4 = .{ .bytes = q, .port = 40000 } },
+            .v6 => |q| .{ .ip6 = .{ .bytes = q, .port = 40000 } },
+        };
+        try std.testing.expectEqual(trace.viewerOf(netaddr.parseIp(c.want).?), viewerOf(&req, peer));
     }
 }
 

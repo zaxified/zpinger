@@ -5,10 +5,13 @@
 //!
 //! A trace is a measurement, not a change, so a read-only instance offers it
 //! too; what bounds it is the server, not the page:
-//! - one session per target, shared by every viewer of that target;
-//! - at most `max_sessions` sessions at once (`--trace-max`, 0 disables);
-//! - a session stops `idle_s` after its last poll and `max_age_s` after it
-//!   started, whatever the page does;
+//! - one session per host, shared by every viewer of every target with
+//!   that host: more viewers never mean more probes;
+//! - at most `max_sessions` sessions at once (`--trace-max`, 0 disables),
+//!   `max_starts_per_min` new ones a minute, `max_per_viewer` per viewer
+//!   (a client address, see `Viewer`);
+//! - a session stops when no viewer polled it for `idle_s` (or the last one
+//!   left), and `max_age_s` after it started, whatever the page does;
 //! - zig-libs `traceroute.Mtr` paces each round (probes `gap_ms` apart) and
 //!   never starts rounds closer than `interval_ms`.
 //! Without CAP_NET_RAW it runs on an unprivileged ping socket, like the
@@ -55,7 +58,27 @@ const mtr_options: traceroute.MtrOptions = .{
     .gap_ms = 20,
 };
 
-pub const Error = error{ TraceDisabled, TooManyTraces };
+pub const Error = error{ TraceDisabled, TooManyTraces, ViewerLimit, RateLimited };
+
+/// Live traces one viewer may watch at once.
+pub const max_per_viewer = 2;
+/// New sessions per minute, all viewers together.
+pub const max_starts_per_min = 10;
+/// Viewer-to-session watches kept at once (a full table refuses new viewers).
+const max_watches = 256;
+
+/// Who watches a trace: the client address, IPv4 as IPv4-mapped, IPv6 cut
+/// to its /64, the prefix one subscriber gets, so one subscriber cannot
+/// pose as many viewers.
+pub const Viewer = [16]u8;
+
+pub fn viewerOf(ip: netaddr.Ip) Viewer {
+    var v = ip.as16();
+    if (ip.unmap() == .v6) @memset(v[8..], 0);
+    return v;
+}
+
+const Watch = struct { viewer: Viewer, session: *Session, last_poll: i64 };
 
 pub const Tracer = struct {
     gpa: std.mem.Allocator,
@@ -64,7 +87,13 @@ pub const Tracer = struct {
     /// Look up hop names (reverse DNS).
     names: bool = true,
     mutex: Io.Mutex = .init,
+    /// One session per host: every viewer of that host, through any target,
+    /// reads the same measurement.
     slots: [max_slots]?*Session = @splat(null),
+    watches: [max_watches]?Watch = @splat(null),
+    /// Start times of the last `max_starts_per_min` sessions (a ring).
+    starts: [max_starts_per_min]?i64 = @splat(null),
+    start_i: usize = 0,
 
     /// Stops every session and waits for their threads.
     pub fn deinit(t: *Tracer) void {
@@ -75,68 +104,142 @@ pub const Tracer = struct {
         };
     }
 
-    /// Starts a trace of `host` for target `id`, or keeps the running one
-    /// alive. A finished session (idle, too old, failed) is replaced.
-    pub fn start(t: *Tracer, id: u32, host: []const u8) (Error || error{OutOfMemory} || Io.ConcurrentError)!void {
+    /// `viewer` watches the trace of `host`: joins the running session, or
+    /// starts one. A finished session (idle, too old, failed) is replaced.
+    pub fn start(t: *Tracer, host: []const u8, viewer: Viewer) (Error || error{OutOfMemory} || Io.ConcurrentError)!void {
         if (t.max_sessions == 0) return error.TraceDisabled;
         t.mutex.lockUncancelable(t.io);
         defer t.mutex.unlock(t.io);
         const now = t.clock();
+        t.expireWatches(now);
+        if (t.running(host)) |s| return t.watch(viewer, s, now);
+
+        if (t.watchCount(viewer) >= max_per_viewer) return error.ViewerLimit;
+        if (t.freeWatch() == null) return error.TooManyTraces;
         var free: ?usize = null;
-        var running: usize = 0;
+        var running_n: usize = 0;
         for (&t.slots, 0..) |*slot, i| {
             const s = slot.* orelse {
                 if (free == null) free = i;
                 continue;
             };
-            if (s.id == id and std.mem.eql(u8, s.host, host) and !s.finished.load(.acquire)) {
-                s.last_poll.store(now, .monotonic);
-                return;
-            }
-            if (s.id == id or s.finished.load(.acquire)) {
-                // Another host for the same target (edited), or over: replace.
-                s.stop.store(true, .monotonic);
-                t.release(s);
+            if (s.finished.load(.acquire)) {
+                t.drop(s);
                 slot.* = null;
                 if (free == null) free = i;
                 continue;
             }
-            running += 1;
+            running_n += 1;
         }
-        if (running >= t.max_sessions) return error.TooManyTraces;
+        if (running_n >= t.max_sessions) return error.TooManyTraces;
         const slot = free orelse return error.TooManyTraces;
+        if (t.rateLimited(now)) return error.RateLimited;
 
         const s = try t.gpa.create(Session);
         errdefer t.gpa.destroy(s);
-        s.* = .{ .tracer = t, .id = id, .host = try t.gpa.dupe(u8, host), .started = now, .last_poll = .init(now) };
+        s.* = .{ .tracer = t, .host = try t.gpa.dupe(u8, host), .started = now, .last_poll = .init(now) };
         errdefer t.gpa.free(s.host);
         s.future = try t.io.concurrent(Session.run, .{s});
         t.slots[slot] = s;
+        t.noteStart(now);
+        t.watch(viewer, s, now) catch unreachable; // count and room checked above
     }
 
-    /// Stops the trace of target `id`, if any.
-    pub fn stop(t: *Tracer, id: u32) void {
+    /// `viewer` stops watching the trace of `host`; the session stops when
+    /// nobody watches it any more.
+    pub fn stop(t: *Tracer, host: []const u8, viewer: Viewer) void {
         t.mutex.lockUncancelable(t.io);
         defer t.mutex.unlock(t.io);
-        for (&t.slots) |*slot| if (slot.*) |s| if (s.id == id) {
-            s.stop.store(true, .monotonic);
-            t.release(s);
+        t.expireWatches(t.clock());
+        const s = t.running(host) orelse return;
+        var others = false;
+        for (&t.watches) |*w| if (w.*) |x| if (x.session == s) {
+            if (std.mem.eql(u8, &x.viewer, &viewer)) w.* = null else others = true;
+        };
+        if (others) return;
+        for (&t.slots) |*slot| if (slot.* == s) {
+            t.drop(s);
             slot.* = null;
         };
     }
 
-    /// The trace of target `id` as JSON (see `Session.writeJson`), and a
-    /// poll that keeps it running; null when there is none.
-    pub fn json(t: *Tracer, id: u32, arena: std.mem.Allocator) error{OutOfMemory}!?[]u8 {
+    /// The trace of `host` as JSON (see `Session.writeJson`); null when there
+    /// is none. Reading a running trace is watching it: it keeps the session
+    /// alive and counts against `viewer`'s limit.
+    pub fn json(t: *Tracer, host: []const u8, viewer: Viewer, arena: std.mem.Allocator) (error{ OutOfMemory, ViewerLimit, TooManyTraces })!?[]u8 {
         t.mutex.lockUncancelable(t.io);
         defer t.mutex.unlock(t.io);
-        for (t.slots) |slot| if (slot) |s| if (s.id == id) {
-            s.last_poll.store(t.clock(), .monotonic);
-            var out: Io.Writer.Allocating = .init(arena);
-            s.writeJson(&out.writer, t.clock()) catch return error.OutOfMemory;
-            return out.written();
-        };
+        const now = t.clock();
+        t.expireWatches(now);
+        const s = t.running(host) orelse t.session(host) orelse return null;
+        if (!s.finished.load(.acquire)) try t.watch(viewer, s, now);
+        var out: Io.Writer.Allocating = .init(arena);
+        s.writeJson(&out.writer, now) catch return error.OutOfMemory;
+        return out.written();
+    }
+
+    /// Whether `max_starts_per_min` sessions started in the last minute.
+    fn rateLimited(t: *const Tracer, now: i64) bool {
+        const oldest = t.starts[t.start_i] orelse return false;
+        return now - oldest < 60;
+    }
+
+    fn noteStart(t: *Tracer, now: i64) void {
+        t.starts[t.start_i] = now;
+        t.start_i = (t.start_i + 1) % max_starts_per_min;
+    }
+
+    /// The running session of `host`. Under `mutex`.
+    fn running(t: *Tracer, host: []const u8) ?*Session {
+        for (t.slots) |slot| if (slot) |s| if (std.mem.eql(u8, s.host, host) and !s.finished.load(.acquire)) return s;
         return null;
+    }
+
+    /// Any session of `host`, finished ones too. Under `mutex`.
+    fn session(t: *Tracer, host: []const u8) ?*Session {
+        for (t.slots) |slot| if (slot) |s| if (std.mem.eql(u8, s.host, host)) return s;
+        return null;
+    }
+
+    /// Records (or refreshes) that `viewer` watches `s`. Under `mutex`.
+    fn watch(t: *Tracer, viewer: Viewer, s: *Session, now: i64) error{ ViewerLimit, TooManyTraces }!void {
+        s.last_poll.store(now, .monotonic);
+        for (&t.watches) |*w| if (w.*) |*x| if (x.session == s and std.mem.eql(u8, &x.viewer, &viewer)) {
+            x.last_poll = now;
+            return;
+        };
+        if (t.watchCount(viewer) >= max_per_viewer) return error.ViewerLimit;
+        const i = t.freeWatch() orelse return error.TooManyTraces;
+        t.watches[i] = .{ .viewer = viewer, .session = s, .last_poll = now };
+    }
+
+    fn watchCount(t: *const Tracer, viewer: Viewer) usize {
+        var n: usize = 0;
+        for (t.watches) |w| if (w) |x| if (std.mem.eql(u8, &x.viewer, &viewer)) {
+            n += 1;
+        };
+        return n;
+    }
+
+    fn freeWatch(t: *const Tracer) ?usize {
+        for (t.watches, 0..) |w, i| if (w == null) return i;
+        return null;
+    }
+
+    /// Forgets watches not polled for `idle_s`, and those of finished sessions.
+    fn expireWatches(t: *Tracer, now: i64) void {
+        for (&t.watches) |*w| if (w.*) |x| if (now - x.last_poll > idle_s or x.session.finished.load(.acquire)) {
+            w.* = null;
+        };
+    }
+
+    /// Stops `s`, forgets its watches and frees it. Under `mutex`.
+    fn drop(t: *Tracer, s: *Session) void {
+        for (&t.watches) |*w| if (w.*) |x| if (x.session == s) {
+            w.* = null;
+        };
+        s.stop.store(true, .monotonic);
+        t.release(s);
     }
 
     /// Waits for the session's thread (it stops within a round) and frees
@@ -187,7 +290,6 @@ const Name = struct {
 
 const Session = struct {
     tracer: *Tracer,
-    id: u32,
     host: []u8,
     started: i64,
     last_poll: std.atomic.Value(i64),
@@ -215,7 +317,7 @@ const Session = struct {
         var names: ?Io.Future(void) = if (s.tracer.names) io.concurrent(lookupNames, .{s}) catch null else null;
         defer if (names) |*f| f.cancel(io);
         const reason = s.trace() catch |err| blk: {
-            log.info("trace of target {d} ({s}) failed: {t}", .{ s.id, s.host, err });
+            log.info("trace of {s} failed: {t}", .{ s.host, err });
             break :blk switch (err) {
                 error.UnknownHostName => Reason.unresolved,
                 error.PermissionDenied => Reason.no_socket,
@@ -413,16 +515,89 @@ test "sparkline keeps the last spark_len rounds, oldest first" {
     try testing.expectEqual(@as(?u32, null), h.spark[2]); // round 7 (i % 7 == 0): lost
 }
 
+const viewer_a = viewerOf(.{ .v4 = .{ 192, 0, 2, 1 } });
+const viewer_b = viewerOf(.{ .v4 = .{ 192, 0, 2, 2 } });
+
 test "a disabled tracer starts nothing" {
     var t: Tracer = .{ .gpa = testing.allocator, .io = testing.io, .max_sessions = 0 };
     defer t.deinit();
-    try testing.expectError(error.TraceDisabled, t.start(1, "127.0.0.1"));
-    try testing.expectEqual(@as(?[]u8, null), try t.json(1, testing.allocator));
+    try testing.expectError(error.TraceDisabled, t.start("127.0.0.1", viewer_a));
+    try testing.expectEqual(@as(?[]u8, null), try t.json("127.0.0.1", viewer_a, testing.allocator));
+}
+
+test "viewer: IPv6 by /64, IPv4 by address" {
+    const a = netaddr.parseIp("2001:db8:1:2::1").?;
+    const b = netaddr.parseIp("2001:db8:1:2:ffff::9").?;
+    const c = netaddr.parseIp("2001:db8:1:3::1").?;
+    try testing.expectEqual(viewerOf(a), viewerOf(b));
+    try testing.expect(!std.mem.eql(u8, &viewerOf(a), &viewerOf(c)));
+    try testing.expect(!std.mem.eql(u8, &viewer_a, &viewer_b));
+    // IPv4-mapped is the same viewer as plain IPv4, not cut to a /64.
+    try testing.expectEqual(viewer_a, viewerOf(netaddr.parseIp("::ffff:192.0.2.1").?));
+}
+
+/// A session in the table that runs no thread (tests of the bookkeeping).
+fn idleSession(t: *Tracer, host: []const u8, now: i64) !*Session {
+    const s = try t.gpa.create(Session);
+    s.* = .{ .tracer = t, .host = try t.gpa.dupe(u8, host), .started = now, .last_poll = .init(now) };
+    for (&t.slots) |*slot| if (slot.* == null) {
+        slot.* = s;
+        return s;
+    };
+    unreachable;
+}
+
+test "a viewer watches at most max_per_viewer traces; watches expire" {
+    var t: Tracer = .{ .gpa = testing.allocator, .io = testing.io };
+    defer t.deinit();
+    const s1 = try idleSession(&t, "h1", 0);
+    const s2 = try idleSession(&t, "h2", 0);
+    const s3 = try idleSession(&t, "h3", 0);
+    try t.watch(viewer_a, s1, 0);
+    try t.watch(viewer_a, s2, 0);
+    try t.watch(viewer_a, s1, 5); // a refresh, not a third watch
+    try testing.expectError(error.ViewerLimit, t.watch(viewer_a, s3, 5));
+    try t.watch(viewer_b, s3, 5); // another viewer is not limited by a's
+    try testing.expectEqual(@as(i64, 5), s1.last_poll.load(.monotonic));
+    t.expireWatches(5 + idle_s + 1);
+    try testing.expectEqual(@as(usize, 0), t.watchCount(viewer_a));
+    try t.watch(viewer_a, s3, 40);
+}
+
+test "stop: the session ends only when its last viewer leaves" {
+    var t: Tracer = .{ .gpa = testing.allocator, .io = testing.io };
+    defer t.deinit();
+    const now = t.clock();
+    const s = try idleSession(&t, "h", now);
+    try t.watch(viewer_a, s, now);
+    try t.watch(viewer_b, s, now);
+    t.stop("h", viewer_a);
+    try testing.expect(t.running("h") == s);
+    try testing.expectEqual(@as(usize, 0), t.watchCount(viewer_a));
+    t.stop("h", viewer_b);
+    try testing.expect(t.session("h") == null);
+}
+
+test "at most max_starts_per_min new sessions a minute" {
+    var t: Tracer = .{ .gpa = testing.allocator, .io = testing.io };
+    defer t.deinit();
+    // A fresh tracer, at any clock value (the awake clock may be small).
+    for ([_]i64{ 0, 5, 1 << 40 }) |now| try testing.expect(!t.rateLimited(now));
+    for (0..max_starts_per_min) |k| t.noteStart(1000 + @as(i64, @intCast(k)));
+    try testing.expect(t.rateLimited(1059));
+    try testing.expect(!t.rateLimited(1060)); // the oldest is a minute old
+    t.noteStart(1060);
+    try testing.expect(t.rateLimited(1060)); // the oldest is now 1001
+    try testing.expect(!t.rateLimited(1061));
+    const now = t.clock();
+    t.starts = @splat(now - 59);
+    try testing.expectError(error.RateLimited, t.start("127.0.0.1", viewer_a));
+    try testing.expectEqual(@as(usize, 0), t.watchCount(viewer_a));
 }
 
 test "snapshot JSON: hops, responders first, microseconds" {
     var t: Tracer = .{ .gpa = testing.allocator, .io = testing.io };
-    var s: Session = .{ .tracer = &t, .id = 3, .host = @constCast("x"), .started = 100, .last_poll = .init(100) };
+    var s: Session = .{ .tracer = &t, .host = @constCast("x"), .started = 100, .last_poll = .init(100) };
     s.address = .{ .v4 = .{ 192, 0, 2, 1 } };
     s.rounds = 2;
     var st: traceroute.MtrHop = .{ .ttl = 1, .sent = 2, .received = 1, .last_ns = 1_500_000, .best_ns = 1_500_000, .worst_ns = 1_500_000, .sum_ns = 1_500_000 };

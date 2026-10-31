@@ -6,6 +6,15 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
+- **Live traces bounded per viewer:** one trace per host (not per target),
+  shared by every viewer; at most 2 per viewer (a client address, IPv6 by
+  /64; behind a proxy on loopback the last `X-Forwarded-For` entry,
+  `--trust-proxy on|off`) and 10 new ones a minute (`429`). `DELETE` ends
+  only the caller's watching; the trace stops when nobody watches it.
+- **A second instance can no longer share the port.** std's `reuse_address`
+  also set SO_REUSEPORT, so a second zpinger bound the same port and the
+  kernel split the requests between the two; now it fails with
+  `AddressInUse`.
 - **Trace table on narrow screens:** the table keeps its horizontal scroll
   position across the per-second refresh (it jumped back to the left edge);
   a hop shows "address name", the name cut with an ellipsis (whole in the

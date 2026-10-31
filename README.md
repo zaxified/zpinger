@@ -77,6 +77,7 @@ zig build                     # ReleaseSafe by default
 | `--cycle SECONDS` | `60` | seconds between cycles (the tests use 5) |
 | `--trace-max N` | `4` | live traces running at once, 0 turns them off ([Live trace](#live-trace)) |
 | `--trace-names on\|off` | `on` | reverse-DNS names of the trace hops |
+| `--trust-proxy on\|off` | `on` | for a request from a loopback peer (your reverse proxy), the viewer of a live trace is the last `X-Forwarded-For` address ([Live trace](#live-trace)) |
 | `--version` | | print the version and exit |
 
 Pinging needs ICMP sockets: either unprivileged ones
@@ -129,11 +130,23 @@ a slow resolver never delays a round); `--trace-names off` shows only the
 addresses.
 
 A trace measures and changes nothing, so a read-only demo offers it too;
-the server bounds it, not the page: one trace per target, shared by every
-viewer; at most `--trace-max` at once (default 4, `0` turns traces off); a
-trace stops 30 s after its last poll and after 10 minutes in any case. The
-page polls an open trace every second and not at all in a hidden tab, and
-stops it when the row is closed.
+the server bounds it, not the page:
+
+- **one trace per host**, shared by every viewer of every target with that
+  host: more viewers never send more probes, they read the same numbers;
+- at most `--trace-max` at once (default 4, `0` turns traces off), and at
+  most 10 new ones a minute;
+- **at most 2 per viewer.** A viewer is a client address, an IPv6 one by
+  its /64 (what one subscriber gets). Behind a reverse proxy every request
+  comes from loopback, so for a loopback peer the viewer is the last
+  `X-Forwarded-For` entry, the one the proxy added (`--trust-proxy off`
+  ignores it); a peer that is not on loopback cannot have the header
+  believed;
+- a trace stops when no viewer polled it for 30 s, and after 10 minutes in
+  any case. Stop (or closing the row) ends only that viewer's watching; the
+  trace goes on while someone else watches it.
+
+The page polls an open trace every second and not at all in a hidden tab.
 
 ## How a cycle works
 
@@ -161,9 +174,9 @@ not the expected one is shown as "no data".
 | `DELETE /api/targets/ID` | remove |
 | `POST /api/targets/ID/pause`, `/resume` | stop and resume probing |
 | `POST /api/targets/ID/ack`, `/unack` | acknowledge a DOWN target, or withdraw the acknowledgement |
-| `POST /api/targets/ID/trace` | start a live trace of the target (or keep the running one); `202`, `503` when `--trace-max` traces run, `403` when traces are off |
-| `GET /api/targets/ID/trace` | the trace: `state`, `reason`, `rounds`, `reached`, and per hop `ttl`, `hosts` (latest first), `names` (reverse DNS of `hosts[i]`, `null` = none or not yet), `sent`, `recv`, `loss` (‰), `last`/`avg`/`best`/`worst`/`jitter` (µs, `null` = none), `code` (Destination Unreachable), `spark` (the last 60 rounds, µs or `null` = lost); polling keeps it running; `404` when none runs |
-| `DELETE /api/targets/ID/trace` | stop it |
+| `POST /api/targets/ID/trace` | start a live trace of the target's host, or join the running one; `202`; `429` when this viewer watches 2 traces already or 10 traces started in the last minute; `503` when `--trace-max` traces run; `403` when traces are off |
+| `GET /api/targets/ID/trace` | the trace: `state`, `reason`, `rounds`, `reached`, and per hop `ttl`, `hosts` (latest first), `names` (reverse DNS of `hosts[i]`, `null` = none or not yet), `sent`, `recv`, `loss` (‰), `last`/`avg`/`best`/`worst`/`jitter` (µs, `null` = none), `code` (Destination Unreachable), `spark` (the last 60 rounds, µs or `null` = lost); polling is watching: it keeps the trace running and counts against the viewer's 2 (`429` over that); `404` when none runs |
+| `DELETE /api/targets/ID/trace` | stop watching it; the trace stops when its last viewer has |
 | `GET /healthz` | `200 {"ok":true,"read_only":...,"demo":...}` while cycles keep finishing (at most 3 cycles apart) and the ICMP socket opens; `503` otherwise. Unreachable targets do not count: they are what is being monitored |
 
 Changes must be sent as `application/json`: a cross-site HTML form cannot do

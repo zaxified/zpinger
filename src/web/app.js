@@ -500,9 +500,10 @@ function renderDetail(detail, t, s) {
 
 // ----- live trace ---------------------------------------------------------------------
 //
-// The server runs at most a few traces, one per target, shared by every viewer,
-// and stops one nobody polls for 30 s. The page polls the open ones every
-// second, and not at all while hidden.
+// The server runs at most a few traces, one per host, shared by every viewer,
+// at most two per viewer, and stops one nobody polls for 30 s. The page polls
+// the open ones every second, and not at all while hidden; Stop only ends
+// this page's watching (the trace goes on for other viewers).
 
 const traces = new Map(); // target id -> { data, stopped, error }
 let traceTimer = null;
@@ -561,6 +562,7 @@ async function pollTracesOnce() {
       if (tr.data.state !== "running") tr.stopped = TRACE_REASONS[tr.data.reason] || "stopped";
     } catch (err) {
       if (err.status === 404) tr.stopped = TRACE_REASONS.idle;
+      else if (err.status === 429 || err.status === 503) tr.stopped = `stopped: ${err.message}`;
       else tr.error = `Cannot reach the server (${err.message}), retrying…`;
     }
     const panel = $(`[data-target="${id}"] .trace`);
