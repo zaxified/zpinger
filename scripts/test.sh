@@ -14,6 +14,10 @@ cd "$REPO"
 echo "==> fmt"
 "$ZIG" fmt --check build.zig build.zig.zon src tools
 
+# The namespace below has no network: fetch the dependencies out here.
+echo "==> fetch"
+"$ZIG" build --fetch=all
+
 echo "==> unit tests"
 scripts/netns-run "$ZIG" build test --summary all
 
