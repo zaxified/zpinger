@@ -29,6 +29,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "http", .module = zig_libs.module("http") },
             .{ .name = "icmp", .module = zig_libs.module("icmp") },
             .{ .name = "netaddr", .module = zig_libs.module("netaddr") },
+            .{ .name = "ratelimit", .module = zig_libs.module("ratelimit") },
             .{ .name = "traceroute", .module = zig_libs.module("traceroute") },
             .{ .name = "build_options", .module = options.createModule() },
         },

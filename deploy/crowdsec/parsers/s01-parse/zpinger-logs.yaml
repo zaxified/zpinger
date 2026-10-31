@@ -1,0 +1,70 @@
+# zpinger's event lines (README "Security log"), e.g.
+#   event: event=http client=198.51.100.7 method="GET" path="/x" status=404 reason=not_found ms=0 bytes=21 ua="curl/8"
+# Every event sets evt.Meta.source_ip (its client), zp_event, zp_action and
+# zp_reason (when it has them); the zpinger scenarios match on those. A
+# request that came straight from the client (no `peer=`: no proxy in
+# front) is also made an http access-log line, so CrowdSec's generic HTTP
+# scenarios see zpinger as they see a web server. Behind a proxy they
+# already see the proxy's own log, and counting a request twice would fill
+# their buckets twice as fast.
+onsuccess: next_stage
+filter: "evt.Parsed.program == 'zpinger'"
+name: zpinger/zpinger-logs
+description: "Parse zpinger security events"
+pattern_syntax:
+  ZP_ADDR: '[0-9A-Fa-f:.]+'
+  ZP_INNER: '(?:[^"\\]|\\.)*'
+nodes:
+  # A request (the server's own refusals have no method, path or ua).
+  - grok:
+      pattern: '^event: event=http client=%{ZP_ADDR:source_ip}(?: peer=%{ZP_ADDR:zp_peer})? status=%{INT:status} reason=%{NOTSPACE:zp_reason}(?: method="%{ZP_INNER:verb}" path="%{ZP_INNER:request}" ms=%{INT:zp_ms} bytes=%{INT:body_bytes_sent} ua="%{ZP_INNER:http_user_agent}")?'
+      apply_on: message
+    statics:
+      - meta: zp_event
+        value: http
+      - meta: zp_reason
+        expression: evt.Parsed.zp_reason
+      - meta: source_ip
+        expression: evt.Parsed.source_ip
+      # What CrowdSec's web-server parsers set, for the generic HTTP
+      # scenarios (the http-logs enricher derives the rest from these).
+      - meta: http_status
+        expression: evt.Parsed.status
+      - meta: http_path
+        expression: evt.Parsed.request
+      - meta: http_verb
+        expression: evt.Parsed.verb
+      - meta: http_user_agent
+        expression: evt.Parsed.http_user_agent
+      - meta: service
+        expression: "evt.Parsed.zp_peer == '' ? 'http' : 'zpinger'"
+      - meta: log_type
+        expression: "evt.Parsed.zp_peer == '' && evt.Parsed.request != '' ? 'http_access-log' : 'zpinger'"
+  # Connections refused at accept, or closed without a request.
+  - grok:
+      pattern: '^event: event=conn client=%{ZP_ADDR:source_ip} action=%{WORD:zp_action} reason=%{WORD:zp_reason}'
+      apply_on: message
+    statics:
+      - meta: zp_event
+        value: conn
+      - meta: zp_action
+        expression: evt.Parsed.zp_action
+      - meta: zp_reason
+        expression: evt.Parsed.zp_reason
+      - meta: source_ip
+        expression: evt.Parsed.source_ip
+      - meta: log_type
+        value: zpinger
+  # Changes and live traces, for the record (no scenario bans on these).
+  - grok:
+      pattern: '^event: event=(?P<zp_event>audit|trace) client=%{ZP_ADDR:source_ip}(?: peer=%{ZP_ADDR:zp_peer})? action=%{WORD:zp_action}'
+      apply_on: message
+    statics:
+      - meta: zp_event
+        expression: evt.Parsed.zp_event
+      - meta: zp_action
+        expression: evt.Parsed.zp_action
+      - meta: source_ip
+        expression: evt.Parsed.source_ip
+      - meta: log_type
+        value: zpinger

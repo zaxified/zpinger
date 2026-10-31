@@ -33,6 +33,8 @@ const traceroute = @import("traceroute");
 const netaddr = @import("netaddr");
 const dns = @import("dns");
 const resolve = @import("monitor.zig").resolve;
+const Monitor = @import("monitor.zig").Monitor;
+const events = @import("events.zig");
 
 const log = std.log.scoped(.trace);
 
@@ -102,6 +104,9 @@ pub const Tracer = struct {
     gpa: std.mem.Allocator,
     io: Io,
     max_sessions: u8 = 4,
+    /// Where a trace takes its target's address: the one the cycle probes.
+    /// Null (tests), or a host no target has an address for: a lookup.
+    addresses: ?*Monitor = null,
     limits: Limits = .writable,
     /// Look up hop names (reverse DNS).
     names: bool = true,
@@ -528,14 +533,16 @@ const Session = struct {
         s.reason = reason;
         s.mutex.unlock(io);
         s.finished.store(true, .release);
+        _ = events.emit(.info, .trace, .system, null, "action=end host={f} reason={t}", .{ events.quote(s.host), reason });
     }
 
     /// Resolves the host, then watches the engine of its family probe it
     /// until the session ends (the engine fills the snapshot).
     fn trace(s: *Session) !Reason {
         const io = s.tracer.io;
+        const cached = if (s.tracer.addresses) |m| m.addressOf(s.host) else null;
         // No address or no answer from DNS: either way, nothing to trace.
-        const addr = resolve(io, s.tracer.gpa, s.host) catch |err| switch (err) {
+        const addr = cached orelse resolve(io, s.tracer.gpa, s.host) catch |err| switch (err) {
             error.Canceled, error.OutOfMemory => |e| return e,
             else => return .unresolved,
         };

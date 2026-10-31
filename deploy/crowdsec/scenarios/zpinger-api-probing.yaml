@@ -1,0 +1,18 @@
+# Changes refused: sent to a read-only instance, not as JSON (a cross-site
+# form), malformed or invalid, a method a route does not take. The page
+# sends none of these; a few in a minute is someone working the API.
+type: leaky
+name: zpinger/api-probing
+description: "Sends changes zpinger refuses"
+filter: "evt.Meta.zp_event == 'http' && evt.Meta.zp_reason in ['read_only', 'not_json', 'bad_json', 'invalid_name', 'invalid_host', 'invalid_tags', 'bad_method']"
+groupby: evt.Meta.source_ip
+capacity: 5
+leakspeed: 1m
+blackhole: 10m
+labels:
+  service: zpinger
+  behavior: "http:exploit"
+  label: "zpinger API probing"
+  confidence: 2
+  spoofable: 0
+  remediation: true

@@ -463,6 +463,9 @@ function renderDetail(detail, t, s) {
   stat("uptime (24 h)", s.uptime === null ? "–" : `${s.uptime.toFixed(2)} %`);
   if (t.acked) stat("acknowledged", `clears after ${state.ack_clear_after - t.ok_streak} more good cycles`);
   if (t.error) stat("last error", t.error);
+  // A name: the address it resolved to (kept for the DNS answer's TTL).
+  if (t.address && t.address !== t.host) stat("address", t.address);
+  if (t.dns === "stale") stat("DNS", "not answering; probing the last known address");
 
 
   const actions = $(".actions", detail);

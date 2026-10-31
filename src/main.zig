@@ -16,8 +16,15 @@ const StateTag = @import("monitor.zig").StateTag;
 const Tracer = @import("trace.zig").Tracer;
 const trace = @import("trace.zig");
 const netaddr = @import("netaddr");
+const events = @import("events.zig");
 
 const log = std.log.scoped(.web);
+
+pub const std_options: std.Options = .{
+    .logFn = events.logFn,
+    // Filtered at run time (`--log-level`), so every level is compiled in.
+    .log_level = .debug,
+};
 
 const usage =
     \\usage: zpinger [options]
@@ -37,6 +44,12 @@ const usage =
     \\                       (default 3600, read-only 600)
     \\  --trust-proxy on|off take the client address of a request from a loopback
     \\                       peer (a reverse proxy) from X-Forwarded-For (default on)
+    \\  --dns-stale SECONDS  keep probing a name's last address this long while
+    \\                       DNS does not answer (default 86400, 0 = never)
+    \\  --access-log refused|all|off
+    \\                       requests logged as events: refused ones (status 400
+    \\                       and up, the default), all, or none; see README
+    \\  --log-level err|warn|info|debug  (default info)
     \\  --version            print the version and exit
     \\
 ;
@@ -108,10 +121,20 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, value, "off")) {
                 trust_proxy = false;
             } else return fail(io, "--trust-proxy is on or off");
+        } else if (std.mem.eql(u8, arg, "--dns-stale")) {
+            monitor.dns_stale_s = std.fmt.parseInt(u31, value, 10) catch return fail(io, "bad --dns-stale");
+        } else if (std.mem.eql(u8, arg, "--access-log")) {
+            access_log = std.meta.stringToEnum(AccessLog, value) orelse return fail(io, "--access-log is refused, all or off");
+        } else if (std.mem.eql(u8, arg, "--log-level")) {
+            events.level = std.meta.stringToEnum(std.log.Level, value) orelse return fail(io, "--log-level is err, warn, info or debug");
         } else return fail(io, "unknown option");
     }
 
     allowed_hosts = hosts.items;
+    events.journal = events.stderrIsJournal(init.environ_map.get("JOURNAL_STREAM"));
+    events.init(gpa);
+    defer events.deinit();
+    tracer_state.addresses = &monitor;
     tracer_state.limits = if (monitor.read_only) .read_only else .writable;
     if (trace_idle) |v| tracer_state.limits.idle_s = v;
     if (trace_age) |v| tracer_state.limits.max_age_s = v;
@@ -120,8 +143,8 @@ pub fn main(init: std.process.Init) !void {
     monitor.loadHistory() catch |err| fatal(io, "cannot load the history from {s}: {t} (move it away to start afresh)", .{ monitor.history_path.?, err });
 
     const address = Io.net.IpAddress.parseLiteral(listen_text) catch return fail(io, "bad --listen");
-    var admission: Admission = .{ .guard = .init(gpa, .{ .max_conns_per_ip = max_connections_per_ip }) };
-    defer admission.guard.deinit();
+    var admission: Admission = .{ .io = io, .gpa = gpa, .guard = .init(gpa, .{ .max_conns_per_ip = max_connections_per_ip }) };
+    defer admission.deinit();
     var server = http.Server.init(io, gpa, .{
         .handler = handle,
         .context = &monitor,
@@ -129,11 +152,11 @@ pub fn main(init: std.process.Init) !void {
         .on_connect_ctx = &admission,
         .on_conn_state = Admission.onConnState,
         .on_conn_state_ctx = &admission,
-        .on_error = logError,
-        .read_timeout_ms = 10_000,
+        .on_error = onError,
+        .read_timeout_ms = read_timeout_ms,
         // Also bounds the wait for a request, the first one included (an
         // `idle_timeout_ms` would replace it there, on the first one too).
-        .request_timeout_ms = 10_000,
+        .request_timeout_ms = read_timeout_ms,
         .write_timeout_ms = 10_000,
         .response_timeout_ms = 30_000,
         .max_header_bytes = 8 * 1024,
@@ -150,8 +173,10 @@ pub fn main(init: std.process.Init) !void {
     // then the listener is bound here and handed to the server.
     server.listener = listenExclusive(address) catch |err|
         fatal(io, "cannot listen on {s}: {t}", .{ listen_text, err });
-    log.info("zpinger {s} listening on http://{s} ({d} targets{s})", .{
-        version, listen_text, monitor.targets.items.len, if (monitor.demo) ", demo" else if (monitor.read_only) ", read-only" else "",
+    _ = events.emit(.info, .start, .system, null, "version={s} listen={s} targets={d} mode={s} trust_proxy={} allow_host={d} trace_max={d} access_log={t} dns_stale={d}", .{
+        version,                                                                          listen_text, monitor.targets.items.len,
+        if (monitor.demo) "demo" else if (monitor.read_only) "read-only" else "writable", trust_proxy, allowed_hosts.len,
+        tracer_state.max_sessions,                                                        access_log,  monitor.dns_stale_s,
     });
 
     // The probing loop and every connection run concurrently; with the
@@ -160,6 +185,7 @@ pub fn main(init: std.process.Init) !void {
     var tasks: Io.Group = .init;
     defer tasks.cancel(io);
     try tasks.concurrent(io, probeLoop, .{&monitor});
+    try tasks.concurrent(io, events.flushLoop, .{io});
     server.serve() catch |err| fatal(io, "serving failed: {t}", .{err});
 }
 
@@ -214,36 +240,104 @@ const max_body_bytes = 4096;
 /// Admission at accept time: the global cap here, the per-client cap in an
 /// `abuseguard.Guard`. A peer on loopback is the reverse proxy, carrying
 /// every client on one address: only the global cap applies to it.
+///
+/// It also follows every connection to its end, to report one that closes
+/// without a single request: a slowloris holding a thread until the read
+/// timeout, a port scan, a TLS client on the plain-HTTP port.
+/// zig-libs request: http — no report of a timeout once a request has
+/// started (a body sent a byte at a time, a response read that slowly):
+/// only a connection with no request at all is seen here.
 const Admission = struct {
+    io: Io,
+    gpa: std.mem.Allocator,
     guard: abuseguard.Guard,
     open: std.atomic.Value(u32) = .init(0),
+    mutex: Io.Mutex = .init,
+    /// Open connections by peer address and port: when it started, and
+    /// how many requests it sent.
+    live: std.AutoHashMapUnmanaged(ConnKey, Conn) = .empty,
+
+    const ConnKey = [18]u8;
+    const Conn = struct { started_ns: i96, requests: u32 = 0 };
+
+    fn deinit(a: *Admission) void {
+        a.live.deinit(a.gpa);
+        a.guard.deinit();
+    }
+
+    fn keyOf(peer: Io.net.IpAddress) ConnKey {
+        var k: ConnKey = undefined;
+        k[0..16].* = ipOf(peer).as16();
+        std.mem.writeInt(u16, k[16..18], peer.getPort(), .big);
+        return k;
+    }
 
     fn onConnect(ctx: ?*anyopaque, peer: Io.net.IpAddress) http.Server.ConnDecision {
         const a: *Admission = @ptrCast(@alignCast(ctx.?));
+        const ip = ipOf(peer);
         if (a.open.fetchAdd(1, .monotonic) >= max_connections) {
             _ = a.open.fetchSub(1, .monotonic);
+            _ = events.emit(.warn, .conn, .conn, .of(ip), "action=refused reason=total_cap", .{});
             return .reject;
         }
-        const ip = ipOf(peer);
         if (ip.isLoopback()) return .accept;
-        return switch (a.guard.admit(ip)) {
-            .admitted, .admitted_untracked => .accept,
+        const verdict = a.guard.admit(ip);
+        switch (verdict) {
+            .admitted, .admitted_untracked => return .accept,
             else => {
                 _ = a.open.fetchSub(1, .monotonic);
+                _ = events.emit(.warn, .conn, .conn, .of(ip), "action=refused reason={t}", .{verdict});
                 return .reject;
             },
-        };
+        }
     }
 
-    /// Every admitted connection reports `.closed` exactly once.
-    fn onConnState(ctx: ?*anyopaque, peer: ?Io.net.IpAddress, state: http.Server.ConnState) void {
-        if (state != .closed) return;
+    /// Every admitted connection reports `.new` and, at its end, `.closed`
+    /// exactly once; `.active` once per request.
+    fn onConnState(ctx: ?*anyopaque, peer_or_null: ?Io.net.IpAddress, state: http.Server.ConnState) void {
         const a: *Admission = @ptrCast(@alignCast(ctx.?));
-        _ = a.open.fetchSub(1, .monotonic);
-        const ip = ipOf(peer orelse return);
-        if (!ip.isLoopback()) a.guard.connClosed(ip);
+        const peer = peer_or_null orelse {
+            if (state == .closed) _ = a.open.fetchSub(1, .monotonic);
+            return;
+        };
+        const now = Io.Clock.awake.now(a.io).nanoseconds;
+        switch (state) {
+            .new => {
+                a.mutex.lockUncancelable(a.io);
+                defer a.mutex.unlock(a.io);
+                a.live.put(a.gpa, keyOf(peer), .{ .started_ns = now }) catch {}; // untracked: not reported
+            },
+            .active => {
+                a.mutex.lockUncancelable(a.io);
+                defer a.mutex.unlock(a.io);
+                if (a.live.getPtr(keyOf(peer))) |c| c.requests += 1;
+            },
+            .idle => {},
+            .closed => {
+                _ = a.open.fetchSub(1, .monotonic);
+                const ip = ipOf(peer);
+                if (!ip.isLoopback()) a.guard.connClosed(ip);
+                const conn = blk: {
+                    a.mutex.lockUncancelable(a.io);
+                    defer a.mutex.unlock(a.io);
+                    break :blk (a.live.fetchRemove(keyOf(peer)) orelse return).value;
+                };
+                if (conn.requests > 0) return;
+                const ms: i64 = @intCast(@divTrunc(now - conn.started_ns, std.time.ns_per_ms));
+                // Held to the read timeout, or closed by the client itself.
+                const timed_out = ms >= read_timeout_ms - 500;
+                if (timed_out) {
+                    _ = events.emit(.warn, .conn, .conn, .of(ip), "action=closed reason=timeout requests=0 ms={d}", .{ms});
+                } else {
+                    _ = events.emit(.info, .conn, .conn, .of(ip), "action=closed reason=no_request requests=0 ms={d}", .{ms});
+                }
+            },
+        }
     }
 };
+
+/// How long a read may stall, and the whole request may take.
+const read_timeout_ms = 10_000;
 
 fn ipOf(address: Io.net.IpAddress) netaddr.Ip {
     return switch (address) {
@@ -252,8 +346,17 @@ fn ipOf(address: Io.net.IpAddress) netaddr.Ip {
     };
 }
 
-fn logError(_: ?*anyopaque, kind: http.Server.ErrorKind, err: ?anyerror, status: u16, _: ?Io.net.IpAddress) void {
-    if (err) |e| log.debug("{t}: {t} ({d})", .{ kind, e, status }) else log.debug("{t} ({d})", .{ kind, status });
+/// Requests the server refused before the handler (a malformed or
+/// oversized head, a body over the cap), handler and server failures. The
+/// request was not parsed, so only the socket peer is known.
+fn onError(_: ?*anyopaque, kind: http.Server.ErrorKind, err: ?anyerror, status: u16, peer: ?Io.net.IpAddress) void {
+    switch (kind) {
+        .request_refused => _ = events.emit(.warn, .http, .client, if (peer) |p| .of(ipOf(p)) else null, "status={d} reason=bad_request_head", .{status}),
+        .handler_failed, .server_failed => _ = events.emit(.err, .http, .client, if (peer) |p| .of(ipOf(p)) else null, "status={d} reason={t} error={t}", .{
+            status, kind, err orelse error.Unknown,
+        }),
+        .accept_failed => log.warn("accept: {t}", .{err orelse error.Unknown}),
+    }
 }
 
 fn fail(io: Io, msg: []const u8) noreturn {
@@ -311,7 +414,47 @@ fn handle(req: *Request, rw: *ResponseWriter) anyerror!void {
     const monitor: *Monitor = @ptrCast(@alignCast(req.context.?));
     var arena_state: std.heap.ArenaAllocator = .init(monitor.gpa);
     defer arena_state.deinit();
+    const started = Io.Clock.awake.now(monitor.io).nanoseconds;
+    reason = "";
+    defer logRequest(req, rw, monitor.io, started);
     return route(monitor, req, rw, arena_state.allocator());
+}
+
+/// Which requests become `event=http` lines (`--access-log`).
+const AccessLog = enum { refused, all, off };
+var access_log: AccessLog = .refused;
+
+/// Why the handler refused the request: a reason code (README, "Security
+/// log"), set by `sendError` for `logRequest`. Per thread: a request is
+/// handled on its connection's thread from start to end.
+threadlocal var reason: []const u8 = "";
+
+fn logRequest(req: *const Request, rw: *const ResponseWriter, io: Io, started: i96) void {
+    const status = rw.status;
+    if (access_log == .off or (access_log == .refused and status < 400)) return;
+    const c = clientOf(req);
+    const ms = @divTrunc(Io.Clock.awake.now(io).nanoseconds - started, std.time.ns_per_ms);
+    // Keys only some lines have: the X-Forwarded-For a client sent where no
+    // proxy is trusted, the name a refused Host header asked for.
+    var extra_buf: [1024]u8 = undefined;
+    var extra: Io.Writer = .fixed(&extra_buf);
+    if (c.xff_ignored) extra.print(" xff_ignored={f}", .{events.quote(req.header("x-forwarded-for") orelse "")}) catch {};
+    if (std.mem.eql(u8, reason, "host_not_allowed")) extra.print(" host={f}", .{events.quote(req.header("host") orelse "")}) catch {};
+    // What parsers match on comes first: a long line is cut at its end.
+    const fields = "status={d} reason={s} method={f} path={f} ms={d} bytes={d} ua={f}{s}";
+    const args = .{
+        status,                                           if (reason.len > 0) reason else "-", events.quote(req.methodName()),
+        events.quote(req.target),                         ms,                                  rw.bodyBytesSent() orelse 0,
+        events.quote(req.header("user-agent") orelse ""), extra.buffered(),
+    };
+    // An error only when the server failed; a 503 for a full trace cap is a refusal.
+    if (status >= 500 and reason.len == 0) {
+        _ = events.emit(.err, .http, .client, c.who, fields, args);
+    } else if (status >= 400) {
+        _ = events.emit(.warn, .http, .client, c.who, fields, args);
+    } else {
+        _ = events.emit(.info, .http, .access, c.who, fields, args);
+    }
 }
 
 /// The live traces; set once before the server starts.
@@ -353,9 +496,10 @@ fn route(monitor: *Monitor, req: *Request, rw: *ResponseWriter, arena: std.mem.A
     const method = req.method;
     const path = req.path;
     if (!monitor.read_only and !hostAllowed(req))
-        return sendError(rw, .misdirected_request, "unknown host name; start the server with --allow-host NAME");
+        return sendError(rw, .misdirected_request, "host_not_allowed", "unknown host name; start the server with --allow-host NAME");
 
-    if (traceTarget(path)) |id| return routeTrace(monitor, req, rw, id, viewerOf(req), arena);
+    const who = clientOf(req).who;
+    if (traceTarget(path)) |id| return routeTrace(monitor, req, rw, id, who, arena);
 
     if (method == .get or method == .head) {
         if (std.mem.eql(u8, path, "/")) return send(rw, .ok, "text/html; charset=utf-8", index_html);
@@ -370,24 +514,27 @@ fn route(monitor: *Monitor, req: *Request, rw: *ResponseWriter, arena: std.mem.A
                 .{ h.ok, h.probing_ok, h.last_cycle, monitor.read_only, monitor.demo, version },
             ));
         }
-        return sendError(rw, .not_found, "not found");
+        return sendError(rw, .not_found, "not_found", "not found");
     }
 
-    if (!std.mem.startsWith(u8, path, "/api/targets")) return sendError(rw, .not_found, "not found");
-    if (monitor.read_only) return sendError(rw, .forbidden, "this is a read-only demo");
+    if (!std.mem.startsWith(u8, path, "/api/targets")) return sendError(rw, .not_found, "not_found", "not found");
+    if (monitor.read_only) return sendError(rw, .forbidden, "read_only", "this is a read-only demo");
     // A cross-site form cannot send a JSON content type without a CORS
     // preflight, which this server never approves: a cheap CSRF guard.
     const content_type = req.header("content-type") orelse "";
     if (!std.mem.startsWith(u8, content_type, "application/json"))
-        return sendError(rw, .unsupported_media_type, "send application/json");
+        return sendError(rw, .unsupported_media_type, "not_json", "send application/json");
 
     // POST /api/targets                {"name": ..., "host": ..., "tags": [...]}
     if (method == .post and std.mem.eql(u8, path, "/api/targets")) {
         const NewTarget = struct { name: []const u8, host: []const u8, tags: []const []const u8 = &.{} };
         const body = try readBody(req, arena);
         const parsed = std.json.parseFromSliceLeaky(NewTarget, arena, body, .{}) catch
-            return sendError(rw, .bad_request, "expected {\"name\": ..., \"host\": ..., \"tags\": [...]}");
+            return sendError(rw, .bad_request, "bad_json", "expected {\"name\": ..., \"host\": ..., \"tags\": [...]}");
         const id = monitor.add(parsed.name, parsed.host, parsed.tags) catch |err| return sendMonitorError(rw, err);
+        _ = events.emit(.info, .audit, .writer, who, "action=add target={d} name={f} host={f} tags={d}", .{
+            id, events.quote(parsed.name), events.quote(parsed.host), parsed.tags.len,
+        });
         return send(rw, .created, "application/json", try arena.print("{{\"id\":{d}}}", .{id}));
     }
 
@@ -395,33 +542,45 @@ fn route(monitor: *Monitor, req: *Request, rw: *ResponseWriter, arena: std.mem.A
     // POST /api/targets/ID/{pause,resume,ack,unack},
     // POST /api/targets/ID/tags {"tags": [...]}
     var parts = std.mem.tokenizeScalar(u8, path["/api/targets".len..], '/');
-    const id = std.fmt.parseInt(u32, parts.next() orelse "", 10) catch return sendError(rw, .not_found, "not found");
+    const id = std.fmt.parseInt(u32, parts.next() orelse "", 10) catch return sendError(rw, .not_found, "not_found", "not found");
     const verb = parts.next();
-    if (parts.next() != null) return sendError(rw, .not_found, "not found");
+    if (parts.next() != null) return sendError(rw, .not_found, "not_found", "not found");
+    // For the audit line: what the target was before the change.
+    var was_buf: [256]u8 = undefined;
+    const was = monitor.hostOf(id, &was_buf) orelse "";
     if (method == .delete and verb == null) {
         monitor.remove(id) catch |err| return sendMonitorError(rw, err);
+        _ = events.emit(.info, .audit, .writer, who, "action=remove target={d} host={f}", .{ id, events.quote(was) });
     } else if (method == .patch and verb == null) {
         const Edit = struct { name: ?[]const u8 = null, host: ?[]const u8 = null, tags: ?[]const []const u8 = null };
         const body = try readBody(req, arena);
         const parsed = std.json.parseFromSliceLeaky(Edit, arena, body, .{}) catch
-            return sendError(rw, .bad_request, "expected {\"name\": ..., \"host\": ..., \"tags\": [...]}");
+            return sendError(rw, .bad_request, "bad_json", "expected {\"name\": ..., \"host\": ..., \"tags\": [...]}");
         monitor.edit(id, parsed.name, parsed.host, parsed.tags) catch |err| return sendMonitorError(rw, err);
+        var extra_buf: [2048]u8 = undefined;
+        var extra: Io.Writer = .fixed(&extra_buf);
+        if (parsed.name) |n| extra.print(" name={f}", .{events.quote(n)}) catch {};
+        if (parsed.host) |h| extra.print(" host={f} host_was={f}", .{ events.quote(h), events.quote(was) }) catch {};
+        if (parsed.tags) |t| extra.print(" tags={d}", .{t.len}) catch {};
+        _ = events.emit(.info, .audit, .writer, who, "action=edit target={d}{s}", .{ id, extra.buffered() });
     } else if (method == .post and verb != null and std.mem.eql(u8, verb.?, "tags")) {
         const Tags = struct { tags: []const []const u8 };
         const body = try readBody(req, arena);
         const parsed = std.json.parseFromSliceLeaky(Tags, arena, body, .{}) catch
-            return sendError(rw, .bad_request, "expected {\"tags\": [...]}");
+            return sendError(rw, .bad_request, "bad_json", "expected {\"tags\": [...]}");
         monitor.setTags(id, parsed.tags) catch |err| return sendMonitorError(rw, err);
+        _ = events.emit(.info, .audit, .writer, who, "action=tags target={d} host={f} tags={d}", .{ id, events.quote(was), parsed.tags.len });
     } else if (method == .post and verb != null) {
         const action = std.meta.stringToEnum(enum { pause, @"resume", ack, unack }, verb.?) orelse
-            return sendError(rw, .not_found, "not found");
+            return sendError(rw, .not_found, "not_found", "not found");
         monitor.apply(id, switch (action) {
             .pause => .pause,
             .@"resume" => .resume_,
             .ack => .ack,
             .unack => .unack,
         }) catch |err| return sendMonitorError(rw, err);
-    } else return sendError(rw, .method_not_allowed, "method not allowed");
+        _ = events.emit(.info, .audit, .writer, who, "action={t} target={d} host={f}", .{ action, id, events.quote(was) });
+    } else return sendError(rw, .method_not_allowed, "bad_method", "method not allowed");
     return send(rw, .ok, "application/json", "{}");
 }
 
@@ -438,62 +597,69 @@ fn traceTarget(path: []const u8) ?u32 {
 /// proxy) from `X-Forwarded-For` (`--trust-proxy`); set before the server starts.
 var trust_proxy = true;
 
-/// The viewer a trace request comes from: the peer address, or behind a
-/// proxy on loopback the last `X-Forwarded-For` entry, the one the proxy
-/// itself added (earlier ones come from the client and prove nothing). A
-/// peer outside loopback cannot get its header trusted.
+/// Who a request comes from: the peer address, or behind a proxy on
+/// loopback the last `X-Forwarded-For` entry, the one the proxy itself
+/// added (earlier ones come from the client and prove nothing). A peer
+/// outside loopback cannot get its header trusted (`xff_ignored`).
+fn clientOf(req: *const Request) struct { who: events.Who, xff_ignored: bool } {
+    // Served over a socket, a request always has its peer; without one
+    // (tests), the unspecified address.
+    const peer: netaddr.Ip = if (req.peerAddress()) |p| ipOf(p) else .{ .v4 = @splat(0) };
+    var headers = req.iterateHeaders();
+    var last: ?[]const u8 = null;
+    while (headers.next()) |h| if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-for")) {
+        last = h.value;
+    };
+    const list = last orelse return .{ .who = .of(peer), .xff_ignored = false };
+    if (!trust_proxy or !peer.isLoopback()) return .{ .who = .of(peer), .xff_ignored = true };
+    const entry = list[if (std.mem.findScalarLast(u8, list, ',')) |c| c + 1 else 0..];
+    const client = netaddr.parseIp(std.mem.trim(u8, entry, " \t")) orelse peer;
+    return .{ .who = .{ .client = client, .peer = peer }, .xff_ignored = false };
+}
+
+/// The viewer a trace request counts against: its client, an IPv6 one by /64.
 fn viewerOf(req: *const Request) trace.Viewer {
-    // Served over a socket, a request always has its peer.
-    const ip = ipOf(req.peerAddress().?);
-    if (trust_proxy and ip.isLoopback()) {
-        var headers = req.iterateHeaders();
-        var last: ?[]const u8 = null;
-        while (headers.next()) |h| if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-for")) {
-            last = h.value;
-        };
-        if (last) |list| {
-            const entry = list[if (std.mem.findScalarLast(u8, list, ',')) |c| c + 1 else 0..];
-            if (netaddr.parseIp(std.mem.trim(u8, entry, " \t"))) |client| return trace.viewerOf(client);
-        }
-    }
-    return trace.viewerOf(ip);
+    return trace.viewerOf(clientOf(req).who.client);
 }
 
 /// A live trace measures, it changes nothing: a read-only instance offers it
 /// too, bounded by the Tracer (one session per host, a global cap, a start
 /// rate, a per-viewer cap, idle and age limits). GET reads it (and keeps
 /// watching it), POST starts or joins it, DELETE stops watching it.
-fn routeTrace(monitor: *Monitor, req: *Request, rw: *ResponseWriter, id: u32, viewer: trace.Viewer, arena: std.mem.Allocator) !void {
+fn routeTrace(monitor: *Monitor, req: *Request, rw: *ResponseWriter, id: u32, who: events.Who, arena: std.mem.Allocator) !void {
+    const viewer = trace.viewerOf(who.client);
     var buf: [256]u8 = undefined;
-    const host = monitor.hostOf(id, &buf) orelse return sendError(rw, .not_found, "no such target");
+    const host = monitor.hostOf(id, &buf) orelse return sendError(rw, .not_found, "no_such_target", "no such target");
     switch (req.method) {
         .get => {
             const found = tracer.json(host, viewer, arena) catch |err| return sendTraceError(rw, err);
-            const body = found orelse return sendError(rw, .not_found, "no trace running");
+            const body = found orelse return sendError(rw, .not_found, "no_trace", "no trace running");
             return send(rw, .ok, "application/json", body);
         },
         .post => {
             // The same CSRF guard as the other writes.
             const content_type = req.header("content-type") orelse "";
             if (!std.mem.startsWith(u8, content_type, "application/json"))
-                return sendError(rw, .unsupported_media_type, "send application/json");
+                return sendError(rw, .unsupported_media_type, "not_json", "send application/json");
             tracer.start(host, viewer) catch |err| return sendTraceError(rw, err);
+            _ = events.emit(.info, .trace, .client, who, "action=start target={d} host={f}", .{ id, events.quote(host) });
             return send(rw, .accepted, "application/json", "{}");
         },
         .delete => {
             tracer.stop(host, viewer);
+            _ = events.emit(.info, .trace, .client, who, "action=stop target={d} host={f}", .{ id, events.quote(host) });
             return send(rw, .ok, "application/json", "{}");
         },
-        else => return sendError(rw, .method_not_allowed, "method not allowed"),
+        else => return sendError(rw, .method_not_allowed, "bad_method", "method not allowed"),
     }
 }
 
 fn sendTraceError(rw: *ResponseWriter, err: anyerror) !void {
     return switch (err) {
-        error.TraceDisabled => sendError(rw, .forbidden, "live traces are disabled on this server"),
-        error.TooManyTraces => sendError(rw, .service_unavailable, "too many live traces running; try again in a minute"),
-        error.RateLimited => sendError(rw, .too_many_requests, "too many live traces started in the last minute; try again shortly"),
-        error.ViewerLimit => sendError(rw, .too_many_requests, std.fmt.comptimePrint("you are watching {d} live traces already; stop one first", .{trace.max_per_viewer})),
+        error.TraceDisabled => sendError(rw, .forbidden, "trace_disabled", "live traces are disabled on this server"),
+        error.TooManyTraces => sendError(rw, .service_unavailable, "trace_cap", "too many live traces running; try again in a minute"),
+        error.RateLimited => sendError(rw, .too_many_requests, "trace_rate", "too many live traces started in the last minute; try again shortly"),
+        error.ViewerLimit => sendError(rw, .too_many_requests, "trace_viewer_limit", std.fmt.comptimePrint("you are watching {d} live traces already; stop one first", .{trace.max_per_viewer})),
         else => err,
     };
 }
@@ -618,7 +784,10 @@ fn send(rw: *ResponseWriter, status: Status, content_type: []const u8, body: []c
     return respond(rw, body, .{ .status = status, .content_type = content_type });
 }
 
-fn sendError(rw: *ResponseWriter, status: Status, msg: []const u8) !void {
+/// An error answer: `{"error": msg}`, and `code` (README, "Security log")
+/// for the request's event line.
+fn sendError(rw: *ResponseWriter, status: Status, comptime code: []const u8, msg: []const u8) !void {
+    reason = code;
     var buf: [256]u8 = undefined;
     const body = std.mem.print(&buf, "{{\"error\":{f}}}", .{std.json.fmt(msg, .{})}) catch unreachable;
     return send(rw, status, "application/json", body);
@@ -626,12 +795,12 @@ fn sendError(rw: *ResponseWriter, status: Status, msg: []const u8) !void {
 
 fn sendMonitorError(rw: *ResponseWriter, err: anyerror) !void {
     return switch (err) {
-        error.UnknownTarget => sendError(rw, .not_found, "no such target"),
-        error.InvalidName => sendError(rw, .bad_request, "name: 1-64 printable characters"),
-        error.InvalidHost => sendError(rw, .bad_request, "host: an IP address or a DNS name"),
-        error.InvalidTags => sendError(rw, .bad_request, "tags: at most 8, each 1-32 characters, no spaces or commas"),
-        error.TooManyTargets => sendError(rw, .conflict, "too many targets"),
-        error.NotDown => sendError(rw, .conflict, "only a DOWN target can be acknowledged"),
+        error.UnknownTarget => sendError(rw, .not_found, "no_such_target", "no such target"),
+        error.InvalidName => sendError(rw, .bad_request, "invalid_name", "name: 1-64 printable characters"),
+        error.InvalidHost => sendError(rw, .bad_request, "invalid_host", "host: an IP address or a DNS name"),
+        error.InvalidTags => sendError(rw, .bad_request, "invalid_tags", "tags: at most 8, each 1-32 characters, no spaces or commas"),
+        error.TooManyTargets => sendError(rw, .conflict, "too_many_targets", "too many targets"),
+        error.NotDown => sendError(rw, .conflict, "not_down", "only a DOWN target can be acknowledged"),
         else => err,
     };
 }
@@ -652,6 +821,8 @@ test "routes: pages, HEAD, state with ETag and gzip, read-only, Host guard, body
     var m: Monitor = .{ .gpa = testing.allocator, .io = testing.io, .config_path = "unused", .read_only = true };
     defer m.deinit();
     m.cycle_s = 1 << 30; // no new cycle (a new ETag) during the test
+    events.level = .err; // the refusals' event lines
+    defer events.level = .info;
     _ = try m.add("a", "192.0.2.1", &.{}); // read-only: never saved
 
     {

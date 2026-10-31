@@ -1,0 +1,17 @@
+# Connections refused at accept for being over the per-client cap (16
+# open): a client that keeps opening more is flooding.
+type: leaky
+name: zpinger/conn-flood
+description: "Opens connections past zpinger's per-client cap"
+filter: "evt.Meta.zp_event == 'conn' && evt.Meta.zp_action == 'refused' && evt.Meta.zp_reason == 'per_ip_cap'"
+groupby: evt.Meta.source_ip
+capacity: 20
+leakspeed: 10s
+blackhole: 10m
+labels:
+  service: zpinger
+  behavior: "tcp:dos"
+  label: "zpinger connection flood"
+  confidence: 3
+  spoofable: 0
+  remediation: true

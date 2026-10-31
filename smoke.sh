@@ -66,6 +66,12 @@ curl -sf "$URL/healthz" | grep -q '"ok":true.*"read_only":false' || fail "not he
 # and --allow-host names.
 host() { curl -s -o /dev/null -w '%{http_code}' -H "host: $1" "$URL/api/state"; }
 [ "$(host evil.example)" = 421 ] || fail "writable instance answers to any Host"
+# Events (README, "Security log"): the start, a refusal with the name asked for.
+grep -q 'event=start version=.* mode=writable' log || fail "no start event: $(cat log)"
+grep -q 'event=http client=127.0.0.1 status=421 reason=host_not_allowed method="GET" path="/api/state" .*host="evil.example"' log || fail "421 not logged"
+# Behind a proxy on loopback, the client is the address it forwarded.
+curl -s -o /dev/null -H 'X-Forwarded-For: 203.0.113.1, 198.51.100.7' "$URL/nope"
+grep -q 'event=http client=198.51.100.7 peer=127.0.0.1 status=404 reason=not_found method="GET" path="/nope"' log || fail "forwarded client not logged"
 [ "$(host localhost:$PORT)" = 200 ] || fail "writable instance refuses localhost"
 curl -sI "$URL/" | grep -qi '^content-security-policy:' || fail "no CSP header"
 # A client that connects and sends nothing is cut off by the read timeout
@@ -100,6 +106,7 @@ status 200 POST /api/targets/2/pause
 [ "$(revalidate "$ETAG")" = 200 ] || fail "a change does not change the ETag"
 status 400 POST /api/targets '{"name":"x","host":"no such host!"}'
 status 201 POST /api/targets '{"name":"added","host":"127.0.0.2"}'
+grep -q 'event=audit client=127.0.0.1 action=add target=4 name="added" host="127.0.0.2" tags=0' log || fail "add not audited"
 status 200 DELETE /api/targets/4
 status 404 DELETE /api/targets/4
 status 201 POST /api/targets '{"name":"tagged","host":"127.0.0.3","tags":["Lab","core"]}'
@@ -120,6 +127,7 @@ got=$(curl -s -o /dev/null -w '%{http_code}' -X POST -d 'x=1' "$URL/api/targets/
 [ "$got" = 415 ] || fail "form post: HTTP $got, expected 415"
 # Live trace (mtr style): start, poll until the destination answers, stop.
 status 202 POST /api/targets/1/trace
+grep -q 'event=trace client=127.0.0.1 action=start target=1 host="127.0.0.1"' log || fail "trace start not logged"
 i=0
 until curl -sf "$URL/api/targets/1/trace" | grep -q '"reached":true'; do
     i=$((i + 1)); [ $i -lt 60 ] || fail "trace of 127.0.0.1 never reached it"; sleep 0.1
@@ -136,6 +144,7 @@ grep -q '"acked": true' targets.json || fail "ack not saved"
 wait "$IDLE"
 idle=$(( $(cat idle.end) - $(cat idle.start) ))
 [ "$idle" -ge 9 ] && [ "$idle" -le 13 ] || fail "idle connection closed after ${idle} s, expected ~10 s"
+grep -q 'event=conn client=127.0.0.1 action=closed reason=timeout requests=0 ms=' log || fail "idle connection not logged"
 stop
 
 # Read-only: history survives the restart, every change is refused.

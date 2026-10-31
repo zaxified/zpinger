@@ -43,6 +43,10 @@ for pair in x86_64-linux:amd64 aarch64-linux:arm64; do
     install -D -m 0644 targets.json "$stage/usr/share/zpinger/targets.json"
     install -D -m 0644 deploy/demo-targets.json "$stage/usr/share/zpinger/demo-targets.json"
     install -D -m 0644 deploy/Caddyfile "$stage/usr/share/zpinger/Caddyfile"
+    # CrowdSec acquisition, parser and scenarios for the security log.
+    (cd deploy && find crowdsec -type f) | while read -r f; do
+        install -D -m 0644 "deploy/$f" "$stage/usr/share/zpinger/$f"
+    done
     # The about page for a demo hub: /usr/share/zpinger/about/.
     "$ZIG" build about --prefix "$stage/usr/share/zpinger"
     install -D -m 0644 README.md "$stage/usr/share/doc/zpinger/README.md"

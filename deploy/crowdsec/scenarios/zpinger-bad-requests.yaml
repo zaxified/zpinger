@@ -1,0 +1,17 @@
+# Requests the server refused before reading them whole: malformed (400),
+# oversized (413, 414, 431). Browsers do not send these.
+type: leaky
+name: zpinger/bad-requests
+description: "Sends malformed or oversized requests"
+filter: "evt.Meta.zp_event == 'http' && evt.Meta.zp_reason == 'bad_request_head'"
+groupby: evt.Meta.source_ip
+capacity: 5
+leakspeed: 1m
+blackhole: 10m
+labels:
+  service: zpinger
+  behavior: "http:exploit"
+  label: "zpinger malformed requests"
+  confidence: 2
+  spoofable: 0
+  remediation: true

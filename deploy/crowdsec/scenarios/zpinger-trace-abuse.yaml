@@ -1,0 +1,18 @@
+# Live traces are the one thing a viewer can make zpinger send probes for.
+# Its own limits answer 429/503; a client that keeps asking past them is
+# not a person watching a trace.
+type: leaky
+name: zpinger/trace-abuse
+description: "Keeps starting live traces past zpinger's limits"
+filter: "evt.Meta.zp_event == 'http' && evt.Meta.zp_reason in ['trace_rate', 'trace_viewer_limit', 'trace_cap']"
+groupby: evt.Meta.source_ip
+capacity: 10
+leakspeed: 30s
+blackhole: 5m
+labels:
+  service: zpinger
+  behavior: "http:dos"
+  label: "zpinger live trace abuse"
+  confidence: 2
+  spoofable: 0
+  remediation: true

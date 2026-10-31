@@ -1,0 +1,20 @@
+# A writable instance asked for under a name it does not answer to (421):
+# a DNS-rebinding page, or a scanner trying names. A browser on a rebinding
+# page sends several in a row. So does a person opening a writable
+# instance under a name missing from --allow-host (the page polls): allow
+# your own networks in CrowdSec, a firewall ban cuts SSH off too.
+type: leaky
+name: zpinger/host-mismatch
+description: "Asks a writable zpinger for a host name it does not serve"
+filter: "evt.Meta.zp_event == 'http' && evt.Meta.zp_reason == 'host_not_allowed'"
+groupby: evt.Meta.source_ip
+capacity: 10
+leakspeed: 10m
+blackhole: 30m
+labels:
+  service: zpinger
+  behavior: "http:exploit"
+  label: "zpinger DNS rebinding or host scan"
+  confidence: 3
+  spoofable: 0
+  remediation: true

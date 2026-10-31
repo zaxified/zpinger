@@ -6,6 +6,30 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
+- **Security log.** Every refusal, connection drop, change and live trace is
+  an event: one line in a fixed shape (`event=http client=... status=429
+  reason=trace_rate ...`) with the client's address (the forwarded one
+  behind a loopback proxy, `peer=` then names the proxy), client-chosen text
+  quoted and escaped, rate-limited per client and in total. Under systemd
+  each line carries its syslog priority; elsewhere a UTC timestamp. New
+  `--access-log refused|all|off` (default `refused`: status 400 and up) and
+  `--log-level`. Keys and reason codes: README, "Security log".
+- **CrowdSec** acquisition, parser and six scenarios (live-trace abuse, API
+  probing, Host mismatch / DNS rebinding, malformed requests, slowloris,
+  connection floods) in `deploy/crowdsec/`, installed to
+  `/usr/share/zpinger/crowdsec/`. Without a proxy in front, zpinger's
+  request lines also feed CrowdSec's generic HTTP scenarios.
+- **Addresses are kept between cycles** for their DNS TTL (60 s to 1 h;
+  zig-libs `dns.lookupIpTtl`), and an address stays while DNS still returns
+  it, so a name with several addresses is no longer probed at a different
+  one every cycle. When DNS does not answer, the last address is probed for
+  up to `--dns-stale` (default 24 h, RFC 8767) and the page says so; that
+  includes a resolver answering SERVFAIL (zig-libs `dns` now reports it as
+  a failure, not an empty answer), and an answer missing the kept
+  address's family because that family's query failed. A name that no
+  longer exists is DOWN at once and looked up again after its negative TTL
+  (at least a minute). A live trace follows the address
+  the cycle probes. The state JSON has `address` and `dns` per target.
 - **HTTP on zig-libs `http.Server`** instead of std's: keep-alive (a page
   polling a live trace every second reuses its connection), server
   timeouts per request (10 s to send it, 10 s of silence, 30 s to read the
