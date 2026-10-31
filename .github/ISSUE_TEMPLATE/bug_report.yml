@@ -1,0 +1,68 @@
+name: Bug report
+description: Something is broken or behaves differently from what the README says.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. A suspected security problem goes through
+        [private reporting](https://github.com/zaxified/zpinger/security/advisories/new) instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: zpinger version
+      description: Output of `zpinger --version`, or the commit hash if you built from source.
+      placeholder: "0.2.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How is it installed and run?
+      options:
+        - .deb package (systemd service)
+        - Built from source
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - Writable
+        - Read-only (--read-only)
+        - Demo (--demo)
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Distribution and architecture
+      placeholder: "Debian 13, amd64"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened?
+      description: The actual behaviour; paste error output or log lines (`journalctl -u zpinger`).
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Options or environment (`/etc/zpinger/env`), a target list if relevant (any addresses you would rather not publish can be replaced), and the steps.

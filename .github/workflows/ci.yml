@@ -25,7 +25,7 @@ jobs:
           version: 0.17.0
 
       # Ubuntu 24.04 runners restrict unprivileged user namespaces through
-      # AppArmor; scripts/netns-run (unit tests, smoke.sh) needs them to run
+      # AppArmor; scripts/netns-run (unit tests, scripts/smoke.sh) needs them to run
       # live ICMP sockets as a normal user. Inside the namespace it opens
       # ping_group_range itself.
       - name: Allow unprivileged user namespaces

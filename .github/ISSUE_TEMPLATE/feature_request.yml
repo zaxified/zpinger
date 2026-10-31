@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest something zpinger could do.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would it solve?
+      description: What you are trying to monitor or see, and what is missing or awkward today.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like?
+      description: How it could look or behave. Mention any limits it would need if clients can trigger it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Workarounds you use today, or other tools that do it.
