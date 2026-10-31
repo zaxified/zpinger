@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+
+      # Same runner setup as ci.yml (scripts/netns-run).
+      - name: Allow unprivileged user namespaces
+        run: if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+
+      # The full gate; the packages it builds are the release assets.
+      - name: Test and package
+        run: sh scripts/test.sh
+
+      - name: Check the tag against the version
+        run: |
+          version=$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME, build.zig.zon $version" >&2; exit 1; }
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd zig-out/deb
+          sha256sum zpinger_*.deb > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" \
+            --title "zpinger $GITHUB_REF_NAME" \
+            --notes "Debian packages (amd64, arm64; static binary). See CHANGELOG.md for details." \
+            zpinger_*.deb SHA256SUMS

@@ -381,6 +381,8 @@ sh smoke.sh        # end to end: loopback targets, API, ETag, health, Host guard
 
 `smoke.sh` runs itself in an isolated network namespace through
 `scripts/netns-run`; `package.sh` resolves Zig through `scripts/zig-env.sh`.
+`scripts/test.sh` runs all of it (plus `zig fmt --check`) and is what CI
+runs; a `v*` tag runs it too and publishes the packages as a GitHub release.
 
 ## License
 
