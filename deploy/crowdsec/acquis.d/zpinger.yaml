@@ -1,4 +1,4 @@
-# zpinger's events from the journal (README "Security log"). `type: syslog`:
+# zpinger's events from the journal (doc/security-log.md). `type: syslog`:
 # CrowdSec's syslog parser takes the program name (zpinger) and the message
 # from journalctl's line, and the zpinger parser goes on from there.
 source: journalctl

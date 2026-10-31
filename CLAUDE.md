@@ -6,8 +6,13 @@ One static binary (Zig 0.17, std + zig-libs), the web UI embedded. Shipped
 as a .deb (amd64, arm64) with a systemd unit; runs without root or
 CAP_NET_RAW (unprivileged ICMP "ping" sockets).
 
-The README is the user documentation (options, API, how a cycle works); keep
-it in step with every behaviour change.
+User documentation: `README.md` is only the front door (intro, screenshot, a
+five-line install, a feature list, links) — a new user reads that far and no
+further, so keep it short and put everything else in `doc/`:
+`configuration.md` (settings, every option, ICMP), `deploying.md` (package,
+public demo, CrowdSec, sample data, about page), `how-it-works.md`, `api.md`,
+`security-log.md` (a contract for log parsers), `development.md`. Keep them in
+step with every behaviour change; `doc/*.md` ships in the .deb.
 
 ## Layout
 

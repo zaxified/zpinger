@@ -13,7 +13,7 @@
 //! `client` is the address the request is attributed to: the socket peer,
 //! or behind a reverse proxy on loopback the address it forwarded;
 //! `peer` follows only when it differs. Keys and reason codes are listed
-//! in README.md, "Security log"; they are a contract, change them only
+//! in doc/security-log.md; they are a contract, change them only
 //! with a changelog entry. Values that come from a client are quoted and
 //! escaped (`"` and `\` with a backslash, every byte outside printable
 //! ASCII as `\xNN`) and cut at `max_value_len` (marked `...`): a request can

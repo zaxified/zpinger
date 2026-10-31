@@ -1,4 +1,4 @@
-# zpinger's event lines (README "Security log"), e.g.
+# zpinger's event lines (doc/security-log.md), e.g.
 #   event: event=http client=198.51.100.7 method="GET" path="/x" status=404 reason=not_found ms=0 bytes=21 ua="curl/8"
 # Every event sets evt.Meta.source_ip (its client), zp_event, zp_action and
 # zp_reason (when it has them); the zpinger scenarios match on those. A

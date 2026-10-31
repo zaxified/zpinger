@@ -6,6 +6,17 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased (0.2.0)
 
+- **Shorter README, documentation in `doc/`.** The README is an
+  introduction, the screenshot and a five-line install (download, checksum,
+  `apt install`); settings, every option, deploying, how it works, the API
+  and the security log each have a page in `doc/`, shipped in the package
+  under `/usr/share/doc/zpinger/doc/`. The API table lists method, path and
+  a short description; the details follow it.
+- **The package sets itself up:** it creates `/etc/zpinger/env` with every
+  setting commented out when there is none (settings written before the
+  install are kept, and no dpkg prompt appears), warns at install time when
+  `net.ipv4.ping_group_range` would refuse the service's ping sockets, and
+  says where it listens after a first install.
 - **The first release as zpinger**, formerly fping-watch in zig-fping. The
   package is a new one (`zpinger`, conflicting with `fping-watch`).
 - **Every deadline is reported:** a connection a timeout cut off is

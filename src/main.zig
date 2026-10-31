@@ -34,8 +34,9 @@ const usage =
     \\  --targets FILE       target list, JSON (default targets.json)
     \\  --history FILE       keep the 24 h history across restarts (default: memory only)
     \\  --read-only          public demo: refuse every change
-    \\  --demo               --read-only, plus sample data older than the last hour (see README)
-    \\  --allow-host NAME    also answer to this host name (repeatable); see README
+    \\  --demo               --read-only, plus sample data older than the last hour (doc/deploying.md)
+    \\  --allow-host NAME    also answer to this host name (repeatable); see
+    \\                       doc/configuration.md
     \\  --cycle SECONDS      seconds between probing cycles (default 60)
     \\  --trace-max N        live traces (target detail) running at once (default 4, 0 = off)
     \\  --trace-names on|off reverse-DNS names of the trace hops (default on)
@@ -49,7 +50,7 @@ const usage =
     \\                       DNS does not answer (default 86400, 0 = never)
     \\  --access-log refused|all|off
     \\                       requests logged as events: refused ones (status 400
-    \\                       and up, the default), all, or none; see README
+    \\                       and up, the default), all, or none
     \\  --log-level err|warn|info|debug  (default info)
     \\  --version            print the version and exit
     \\
@@ -428,8 +429,8 @@ fn handle(req: *Request, rw: *ResponseWriter) anyerror!void {
 const AccessLog = enum { refused, all, off };
 var access_log: AccessLog = .refused;
 
-/// Why the handler refused the request: a reason code (README, "Security
-/// log"), set by `sendError` for `logRequest`. Per thread: a request is
+/// Why the handler refused the request: a reason code (doc/security-log.md),
+/// set by `sendError` for `logRequest`. Per thread: a request is
 /// handled on its connection's thread from start to end.
 threadlocal var reason: []const u8 = "";
 
@@ -777,7 +778,7 @@ fn send(rw: *ResponseWriter, status: Status, content_type: []const u8, body: []c
     return respond(rw, body, .{ .status = status, .content_type = content_type });
 }
 
-/// An error answer: `{"error": msg}`, and `code` (README, "Security log")
+/// An error answer: `{"error": msg}`, and `code` (doc/security-log.md)
 /// for the request's event line.
 fn sendError(rw: *ResponseWriter, status: Status, comptime code: []const u8, msg: []const u8) !void {
     reason = code;

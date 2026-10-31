@@ -15,8 +15,8 @@ touches more than one area, consider splitting it.
   `CAP_NET_RAW`.
 - **Bounded.** Everything a client can trigger (connections, live traces,
   log lines) has a limit; a new feature reachable from the web needs one
-  too, and a line in the README if it is a new option.
-- **The security log is a contract.** The README section "Security log"
+  too, and a line in `doc/configuration.md` if it is a new option.
+- **The security log is a contract.** `doc/security-log.md`
   lists every event and key; parsers (CrowdSec in `deploy/crowdsec/`)
   match on it. Keep the field order; add new keys at the end of a line.
 - **English** for code comments, commit messages and documentation.

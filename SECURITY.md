@@ -48,7 +48,7 @@ writable instance), so the realistic attack surfaces are:
 - Denial of service by sheer volume that the documented limits already
   bound (put a reverse proxy or CrowdSec in front for rates).
 - What a read-only instance publishes by design: target names and
-  addresses are public there (README, "Many viewers, and the open internet").
+  addresses are public there (doc/how-it-works.md, "Many viewers, and the open internet").
 - Issues in upstream dependencies (Zig's standard library, zig-libs):
   report them there, unless zpinger's use turns a harmless bug into a
   security issue.

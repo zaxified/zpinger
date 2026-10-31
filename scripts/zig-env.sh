@@ -1,6 +1,6 @@
 #!/bin/sh
 # Resolve the Zig toolchain pinned by .zigversion. Sourced by test.sh and
-# release.sh; sets $ZIG to a usable compiler, downloading an official
+# package.sh; sets $ZIG to a usable compiler, downloading an official
 # release tarball into .zig-toolchain/ when none is available locally.
 # No sudo, no system-wide installation.
 

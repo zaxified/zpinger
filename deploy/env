@@ -1,0 +1,19 @@
+# zpinger settings, read by zpinger.service. After a change:
+#   systemctl restart zpinger
+# Every line is optional; the defaults are shown. Documentation:
+#   /usr/share/doc/zpinger/doc/configuration.md
+#   https://github.com/zaxified/zpinger/blob/main/doc/configuration.md
+
+# The web server address. Keep it on loopback: a writable instance has no
+# login, so anyone who reaches it can change what it pings. To reach it from
+# your machine: ssh -L 8080:127.0.0.1:8080 this-server
+#ZPINGER_LISTEN=127.0.0.1:8080
+
+# The target list. The default is in the state directory, where the page
+# saves its changes.
+#ZPINGER_TARGETS=/var/lib/zpinger/targets.json
+
+# Further options, e.g. a public read-only demo with sample history:
+#   ZPINGER_TARGETS=/usr/share/zpinger/demo-targets.json
+#   ZPINGER_OPTS=--demo
+#ZPINGER_OPTS=

@@ -66,7 +66,7 @@ curl -sf "$URL/healthz" | grep -q '"ok":true.*"read_only":false' || fail "not he
 # and --allow-host names.
 host() { curl -s -o /dev/null -w '%{http_code}' -H "host: $1" "$URL/api/state"; }
 [ "$(host evil.example)" = 421 ] || fail "writable instance answers to any Host"
-# Events (README, "Security log"): the start, a refusal with the name asked for.
+# Events (doc/security-log.md): the start, a refusal with the name asked for.
 grep -q 'event=start version=.* mode=writable' log || fail "no start event: $(cat log)"
 grep -q 'event=http client=127.0.0.1 status=421 reason=host_not_allowed method="GET" path="/api/state" .*host="evil.example"' log || fail "421 not logged"
 # Behind a proxy on loopback, the client is the address it forwarded.

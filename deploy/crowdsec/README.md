@@ -1,6 +1,6 @@
 # CrowdSec for zpinger
 
-zpinger writes its security events to the journal (README "Security log").
+zpinger writes its security events to the journal ([doc/security-log.md](../../doc/security-log.md)).
 These files let CrowdSec read them and ban what they show:
 
 | File | Goes to |
@@ -9,8 +9,16 @@ These files let CrowdSec read them and ban what they show:
 | `parsers/s01-parse/zpinger-logs.yaml` | `/etc/crowdsec/parsers/s01-parse/` |
 | `scenarios/*.yaml` | `/etc/crowdsec/scenarios/` |
 
-The package installs them under `/usr/share/zpinger/crowdsec/`; copy them,
-then `systemctl reload crowdsec`. Bans are applied by a bouncer (the
+The package installs them under `/usr/share/zpinger/crowdsec/`; with
+CrowdSec installed, copy them in:
+
+```sh
+cd /usr/share/zpinger/crowdsec
+sudo install -m 0644 -D -t /etc/crowdsec/acquis.d acquis.d/zpinger.yaml
+sudo install -m 0644 -D -t /etc/crowdsec/parsers/s01-parse parsers/s01-parse/zpinger-logs.yaml
+sudo install -m 0644 -D -t /etc/crowdsec/scenarios scenarios/*.yaml
+sudo systemctl reload crowdsec
+``` Bans are applied by a bouncer (the
 nftables firewall bouncer bans an address before it reaches zpinger or a
 proxy).
 

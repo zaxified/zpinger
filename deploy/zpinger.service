@@ -31,7 +31,7 @@ UMask=0077
 # No capabilities at all. ICMP goes through unprivileged ping sockets, which
 # net.ipv4.ping_group_range must allow for the service's group; systemd's
 # own sysctl defaults allow every group. Where they do not, a drop-in can
-# grant CAP_NET_RAW instead (see README "Deploying").
+# grant CAP_NET_RAW instead (see doc/configuration.md, "ICMP").
 CapabilityBoundingSet=
 NoNewPrivileges=yes
 

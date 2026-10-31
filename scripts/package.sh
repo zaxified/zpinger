@@ -43,6 +43,8 @@ for pair in x86_64-linux:amd64 aarch64-linux:arm64; do
     install -D -m 0644 deploy/targets.json "$stage/usr/share/zpinger/targets.json"
     install -D -m 0644 deploy/demo-targets.json "$stage/usr/share/zpinger/demo-targets.json"
     install -D -m 0644 deploy/Caddyfile "$stage/usr/share/zpinger/Caddyfile"
+    # The template postinst copies to /etc/zpinger/env when there is none.
+    install -D -m 0644 deploy/env "$stage/usr/share/zpinger/env"
     # CrowdSec acquisition, parser and scenarios for the security log.
     (cd deploy && find crowdsec -type f) | while read -r f; do
         install -D -m 0644 "deploy/$f" "$stage/usr/share/zpinger/$f"
@@ -50,6 +52,7 @@ for pair in x86_64-linux:amd64 aarch64-linux:arm64; do
     # The about page for a demo hub: /usr/share/zpinger/about/.
     "$ZIG" build about --prefix "$stage/usr/share/zpinger"
     install -D -m 0644 README.md "$stage/usr/share/doc/zpinger/README.md"
+    for f in doc/*.md; do install -D -m 0644 "$f" "$stage/usr/share/doc/zpinger/$f"; done
     # The binary links zig-libs in (MIT, whose notice travels with copies):
     # the pinned package's LICENSE, from the hash in build.zig.zon.
     libs_license=$HERE/zig-pkg/$(sed -n 's/^ *\.hash = "\(zig_libs-.*\)",$/\1/p' build.zig.zon)/LICENSE

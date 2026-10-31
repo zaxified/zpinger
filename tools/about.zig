@@ -1,5 +1,5 @@
 //! Build-time tool: turns deploy/about.json into the about page of the demo,
-//! for a demo hub to show (see README "About page").
+//! for a demo hub to show (see doc/deploying.md, "About page").
 //!
 //!   about <about.json> <version> <out about.json> <out about.html> <out about-card.html>
 //!

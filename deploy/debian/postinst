@@ -3,9 +3,28 @@
 # (and keep an admin's disable on upgrades), then start or restart it. A
 # service that fails to start does not fail the installation: its status
 # and /healthz tell why. deb-systemd-invoke also honours policy-rc.d.
+#
+# Before that: /etc/zpinger/env from the commented template, only when
+# there is none (not a conffile: settings written before the install, the
+# way a read-only demo is set up, must not meet a dpkg prompt), and a
+# warning when the kernel would refuse the service's ping sockets.
 set -e
 case "$1" in
     configure | abort-upgrade | abort-deconfigure | abort-remove)
+        if [ ! -e /etc/zpinger/env ]; then
+            install -d -m 0755 /etc/zpinger
+            install -m 0644 /usr/share/zpinger/env /etc/zpinger/env
+        fi
+        # DynamicUser gives the service a group in 61184-65519. One read
+        # (cat): dash's `read` takes a byte at a time, and this sysctl
+        # returns nothing to a read past offset 0.
+        range=$(cat /proc/sys/net/ipv4/ping_group_range 2>/dev/null || true)
+        lo=${range%%[[:space:]]*}
+        hi=${range##*[[:space:]]}
+        if [ -n "$range" ] && { [ "$lo" -gt 61184 ] || [ "$hi" -lt 65519 ]; }; then
+            echo "zpinger: net.ipv4.ping_group_range ($lo $hi) does not allow the service's ping sockets;" >&2
+            echo "zpinger: probing will fail. See https://github.com/zaxified/zpinger/blob/main/doc/configuration.md#icmp" >&2
+        fi
         deb-systemd-helper unmask zpinger.service >/dev/null || true
         # was-enabled is true on a first install.
         if deb-systemd-helper --quiet was-enabled zpinger.service; then
@@ -17,6 +36,10 @@ case "$1" in
             systemctl --system daemon-reload >/dev/null || true
             if [ -n "$2" ]; then action=restart; else action=start; fi
             deb-systemd-invoke "$action" zpinger.service >/dev/null || true
+        fi
+        if [ -z "$2" ]; then
+            listen=$(sed -n 's/^ZPINGER_LISTEN=//p' /etc/zpinger/env | tail -n 1)
+            echo "zpinger: listening on http://${listen:-127.0.0.1:8080} (settings: /etc/zpinger/env)"
         fi
         ;;
 esac
