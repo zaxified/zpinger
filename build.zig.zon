@@ -6,8 +6,8 @@
     .paths = .{ "build.zig", "build.zig.zon", "src", "tools", "deploy", "scripts", "README.md", "LICENSE", "doc" },
     .dependencies = .{
         .zig_libs = .{
-            .url = "git+https://github.com/zaxified/zig-libs.git#79124c9e73019dc7c354942717fe47c532810fa7",
-            .hash = "zig_libs-0.0.0-WiQ0Gnw5uAi7bNpnX3CJoml_HoUIE6cLUmSyqVBc1dtI",
+            .url = "git+https://github.com/zaxified/zig-libs.git#9f2bf53673532ebf7e26a39ba4121242b980fd9f",
+            .hash = "zig_libs-0.0.0-WiQ0GsJXzQjPg10De1xsOVb8QRRKGhddNuCnHnsSdTSf",
         },
     },
 }
