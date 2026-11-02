@@ -15,9 +15,9 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
 
-    // No DNS over HTTPS: trace hop names use the system resolver, and the
-    // http/TLS stack DoH needs would triple the binary.
-    const zig_libs = b.dependency("zig_libs", .{ .target = target, .optimize = optimize, .@"dns-doh" = false });
+    // No DNS over HTTPS or TLS: trace hop names use the system resolver, and
+    // the http/TLS stack either one needs would quadruple the code.
+    const zig_libs = b.dependency("zig_libs", .{ .target = target, .optimize = optimize, .@"dns-doh" = false, .@"dns-dot" = false });
     const mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,

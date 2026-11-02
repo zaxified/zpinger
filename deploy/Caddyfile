@@ -1,6 +1,7 @@
 # Caddy site for the zpinger demo; replace the host name, and the port
 # if /etc/zpinger/env changes it. Caddy adds TLS; compression matters
-# because the state is about 15 KB per target.
+# because the state is about 15 KB per target. For a read-only instance
+# only (--read-only or --demo): a writable one has no login.
 ping.example.org {
 	encode zstd gzip
 	reverse_proxy 127.0.0.1:8080

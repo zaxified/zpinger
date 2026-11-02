@@ -349,9 +349,15 @@ fn ipOf(address: Io.net.IpAddress) netaddr.Ip {
 fn onError(_: ?*anyopaque, kind: http.Server.ErrorKind, err: ?anyerror, status: u16, peer: ?Io.net.IpAddress) void {
     switch (kind) {
         .request_refused => _ = events.emit(.warn, .http, .client, if (peer) |p| .of(ipOf(p)) else null, "status={d} reason=bad_request_head", .{status}),
-        .handler_failed, .server_failed => _ = events.emit(.err, .http, .client, if (peer) |p| .of(ipOf(p)) else null, "status={d} reason={t} error={t}", .{
-            status, kind, err orelse error.Unknown,
-        }),
+        // The client hung up inside its body: not a fault on this side, and
+        // anyone could fill the error log with it.
+        .handler_failed, .server_failed => if (kind == .handler_failed and (err orelse error.Unknown) == error.ReadFailed) {
+            _ = events.emit(.warn, .http, .client, if (peer) |p| .of(ipOf(p)) else null, "status={d} reason=body_aborted", .{status});
+        } else {
+            _ = events.emit(.err, .http, .client, if (peer) |p| .of(ipOf(p)) else null, "status={d} reason={t} error={t}", .{
+                status, kind, err orelse error.Unknown,
+            });
+        },
         .accept_failed => log.warn("accept: {t}", .{err orelse error.Unknown}),
         .timed_out => if (peer) |p| Admission.timedOut(p, err orelse error.Unknown),
     }

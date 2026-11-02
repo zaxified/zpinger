@@ -84,6 +84,9 @@ pub const Error = error{ TraceDisabled, TooManyTraces, ViewerLimit, RateLimited 
 pub const max_per_viewer = 2;
 /// New sessions per minute, all viewers together.
 pub const max_starts_per_min = 10;
+/// New sessions per minute for one viewer: starting and stopping in a loop
+/// must not use up everybody's `max_starts_per_min`.
+pub const max_viewer_starts_per_min = 4;
 /// Viewer-to-session watches kept at once (a full table refuses new viewers).
 const max_watches = 256;
 
@@ -126,6 +129,8 @@ pub const Tracer = struct {
     serial: u64 = 0,
     /// Start times of the last `max_starts_per_min` sessions (a ring).
     starts: [max_starts_per_min]?i64 = @splat(null),
+    /// Who started them.
+    start_viewers: [max_starts_per_min]Viewer = undefined,
     start_i: usize = 0,
 
     /// Stops every session and waits for their threads, then for the
@@ -173,7 +178,7 @@ pub const Tracer = struct {
         }
         if (running_n >= t.max_sessions) return error.TooManyTraces;
         const slot = free orelse return error.TooManyTraces;
-        if (t.rateLimited(now)) return error.RateLimited;
+        if (t.rateLimited(now) or t.viewerRateLimited(viewer, now)) return error.RateLimited;
 
         const s = try t.gpa.create(Session);
         errdefer t.gpa.destroy(s);
@@ -182,7 +187,7 @@ pub const Tracer = struct {
         errdefer t.gpa.free(s.host);
         s.future = try t.io.concurrent(Session.run, .{s});
         t.slots[slot] = s;
-        t.noteStart(now);
+        t.noteStart(viewer, now);
         t.watch(viewer, s, now) catch unreachable; // count and room checked above
     }
 
@@ -227,8 +232,21 @@ pub const Tracer = struct {
         return now - oldest < 60;
     }
 
-    fn noteStart(t: *Tracer, now: i64) void {
+    /// Whether `viewer` started `max_viewer_starts_per_min` sessions in the
+    /// last minute. The ring is enough: it holds every start of the last
+    /// minute that the global limit allowed.
+    fn viewerRateLimited(t: *const Tracer, viewer: Viewer, now: i64) bool {
+        var n: usize = 0;
+        for (t.starts, &t.start_viewers) |started, *v| {
+            const at = started orelse continue;
+            if (now - at < 60 and std.mem.eql(u8, v, &viewer)) n += 1;
+        }
+        return n >= max_viewer_starts_per_min;
+    }
+
+    fn noteStart(t: *Tracer, viewer: Viewer, now: i64) void {
         t.starts[t.start_i] = now;
+        t.start_viewers[t.start_i] = viewer;
         t.start_i = (t.start_i + 1) % max_starts_per_min;
     }
 
@@ -481,6 +499,27 @@ const Hop = struct {
     }
 };
 
+/// A PTR target as a name to show, or null when it is not a host name. DNS
+/// labels are raw bytes and whoever runs a router's reverse zone chooses them:
+/// a line break or an escape sequence must not reach a viewer's "Copy" and,
+/// from there, a terminal.
+fn hopName(ptr: []const u8) ?[]const u8 {
+    // PTR targets come back with or without the root dot.
+    const name = std.mem.trimEnd(u8, ptr, ".");
+    if (name.len == 0) return null;
+    for (name) |c| switch (c) {
+        'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.' => {},
+        else => return null,
+    };
+    return name;
+}
+
+test "hop names: host names only" {
+    try testing.expectEqualStrings("gw-1.example_net.org", hopName("gw-1.example_net.org.").?);
+    for ([_][]const u8{ "", ".", "a\nb.example", "\x1b[2Jx.example", "\xff\xfe.example", "a b.example", "a\"b.example" }) |bad|
+        try testing.expectEqual(@as(?[]const u8, null), hopName(bad));
+}
+
 /// The reverse-DNS name of one hop address.
 const Name = struct {
     ip: netaddr.Ip,
@@ -631,8 +670,7 @@ const Session = struct {
             const n = &s.names[i];
             n.state = .done;
             if (found) |f| if (f.len > 0) {
-                // PTR targets come back with or without the root dot.
-                const name = std.mem.trimEnd(u8, f[0], ".");
+                const name = hopName(f[0]) orelse continue;
                 const len = @min(name.len, n.buf.len);
                 @memcpy(n.buf[0..len], name[0..len]);
                 n.len = @intCast(len);
@@ -832,14 +870,30 @@ test "at most max_starts_per_min new sessions a minute" {
     defer t.deinit();
     // A fresh tracer, at any clock value (the awake clock may be small).
     for ([_]i64{ 0, 5, 1 << 40 }) |now| try testing.expect(!t.rateLimited(now));
-    for (0..max_starts_per_min) |k| t.noteStart(1000 + @as(i64, @intCast(k)));
+    for (0..max_starts_per_min) |k| t.noteStart(viewer_a, 1000 + @as(i64, @intCast(k)));
     try testing.expect(t.rateLimited(1059));
     try testing.expect(!t.rateLimited(1060)); // the oldest is a minute old
-    t.noteStart(1060);
+    t.noteStart(viewer_a, 1060);
     try testing.expect(t.rateLimited(1060)); // the oldest is now 1001
     try testing.expect(!t.rateLimited(1061));
     const now = t.clock();
     t.starts = @splat(now - 59);
+    try testing.expectError(error.RateLimited, t.start("127.0.0.1", viewer_a));
+    try testing.expectEqual(@as(usize, 0), t.watchCount(viewer_a));
+}
+
+test "one viewer cannot use up the starts of everybody else" {
+    var t: Tracer = .{ .gpa = testing.allocator, .io = testing.io };
+    defer t.deinit();
+    const other = viewerOf(.{ .v4 = .{ 192, 0, 2, 99 } });
+    try testing.expect(!t.viewerRateLimited(viewer_a, 5000));
+    for (0..max_viewer_starts_per_min) |k| t.noteStart(viewer_a, 5000 + @as(i64, @intCast(k)));
+    try testing.expect(t.viewerRateLimited(viewer_a, 5059));
+    try testing.expect(!t.viewerRateLimited(other, 5059));
+    try testing.expect(!t.rateLimited(5059)); // nobody else is held back
+    try testing.expect(!t.viewerRateLimited(viewer_a, 5060)); // the oldest is a minute old
+    const now = t.clock();
+    for (0..max_viewer_starts_per_min) |_| t.noteStart(viewer_a, now);
     try testing.expectError(error.RateLimited, t.start("127.0.0.1", viewer_a));
     try testing.expectEqual(@as(usize, 0), t.watchCount(viewer_a));
 }

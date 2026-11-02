@@ -49,8 +49,9 @@ zpinger depends on [zig-libs](https://github.com/zaxified/zig-libs) by URL + has
 capability becomes a zig-libs change (or a request in its module's SPEC backlog), then a
 repin. For local work against a zig-libs checkout: `zig build --fork=<path-to-zig-libs>`;
 a commit that needs an unpushed zig-libs change must not be pushed before that change and
-the repin. Build options are set in `build.zig` (`-Ddns-doh=false`: no DoH, which would
-pull in the http/TLS stack).
+the repin. Build options are set in `build.zig` (`-Ddns-doh=false`, `-Ddns-dot=false`: no
+DoH or DoT, which would pull in the TLS stack). After a repin, compare `size` of the binary
+with the previous pin: a new default-on feature in a module arrives silently.
 
 ## UI decisions (keep unless the owner changes them)
 

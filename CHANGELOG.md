@@ -6,6 +6,14 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased (0.2.0)
 
+- **Audit before the first public deployment.** One viewer can start at most
+  4 live traces a minute, so starting and stopping in a loop no longer uses
+  up everybody's 10. A reverse-DNS answer that is not a host name is shown as
+  no name: control bytes from a router's reverse zone never reach the page or
+  the Copy button. A link with `#sort=constructor` no longer breaks the page.
+  A client hanging up inside its request body logs `reason=body_aborted` as a
+  warning instead of a server error. The binary no longer carries a TLS stack
+  it never uses (zig-libs' new DNS over TLS, `-Ddns-dot=false`).
 - **Shorter README, documentation in `doc/`.** The README is an
   introduction, the screenshot and a five-line install (download, checksum,
   `apt install`); settings, every option, deploying, how it works, the API

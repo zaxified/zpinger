@@ -28,7 +28,10 @@ sudo apt install "./zpinger_${v}_$arch.deb"
 
 It starts right away on `http://127.0.0.1:8080`: open it and add the hosts
 to watch. On a server, reach it through a tunnel:
-`ssh -L 8080:127.0.0.1:8080 server`.
+`ssh -L 8080:127.0.0.1:8080 server`. Until you change that it is writable
+without a login, for anything that reaches the port: on a host you share,
+write `/etc/zpinger/env` before you install. Never put a writable instance
+on the internet.
 
 Everything else is optional: settings in `/etc/zpinger/env`
 ([configuration](doc/configuration.md)), a public read-only demo behind a

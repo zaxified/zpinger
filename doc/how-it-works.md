@@ -20,7 +20,7 @@ before the last 24 hours. The first three tiers are the `nok` pill; tiers
 
 "Trace route" in a target's detail shows the path to it as mtr does: every
 second one ICMP probe goes to each hop (TTL 1, 2, …, up to the destination,
-or 30 hops while it has not answered), 20 ms apart, and each hop keeps its
+or 30 hops while it has not answered), 10 ms apart, and each hop keeps its
 loss and its last, average, best and worst round-trip time and jitter, plus
 the last minute as a sparkline. Loss at one hop that the hops after it do
 not show is that router limiting its ICMP answers, not loss on the path:
@@ -40,16 +40,19 @@ path that changes stops sharing. It runs on the same unprivileged ping socket as
 `traceroute`, which reads the routers' answers from the socket's error
 queue), so it needs no capability either. Hops are named by reverse DNS
 (PTR, through the system resolver, one lookup at a time beside the trace so
-a slow resolver never delays a round); `--trace-names off` shows only the
-addresses.
+a slow resolver never delays a round); a PTR answer that is not a host name
+(letters, digits, `-`, `_`, `.`) counts as no name, and `--trace-names off`
+shows only the addresses.
 
-A trace measures and changes nothing, so a read-only demo offers it too;
-the server bounds it, not the page:
+A trace measures and changes nothing, so a read-only demo offers it too. It
+does show every visitor the path out of your server: your gateway and your
+provider's routers, with their names. If that path is nobody's business,
+`--trace-max 0` turns traces off. The server bounds traces, not the page:
 
 - **one trace per host**, shared by every viewer of every target with that
   host: more viewers never send more probes, they read the same numbers;
 - at most `--trace-max` at once (default 4, `0` turns traces off), and at
-  most 10 new ones a minute;
+  most 10 new ones a minute, 4 of them from one viewer;
 - **at most 2 per viewer.** A viewer is a client address, an IPv6 one by
   its /64 (what one subscriber gets). Behind a reverse proxy every request
   comes from loopback, so for a loopback peer the viewer is the last

@@ -36,9 +36,10 @@ function parseView() {
   return {
     open: new Set(list("open").map(Number)), // ids of expanded targets
     tags: new Set(list("tags")), // a target must have every one
-    st: new Set(list("st").filter((k) => k in PILLS)), // a target must be in one
+    // hasOwn, not `in`: a link's #sort=constructor must not reach Object.prototype.
+    st: new Set(list("st").filter((k) => Object.hasOwn(PILLS, k))), // a target must be in one
     q: p.get("q") || "",
-    sort: p.get("sort") in SORTS ? p.get("sort") : "status",
+    sort: Object.hasOwn(SORTS, p.get("sort") ?? "") ? p.get("sort") : "status",
     rev: p.get("rev") === "1",
   };
 }
