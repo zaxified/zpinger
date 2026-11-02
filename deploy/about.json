@@ -7,10 +7,11 @@
     "One row per host: status, a strip of recent cycles, 24-hour uptime and current latency",
     "Click a row for its 24-hour latency chart with packet loss underneath",
     "Tags, search and ordering narrow a long list to one site or service, problems first",
+    "A live trace of the route to any listed host, hop by hop, as mtr shows it",
     "Paced probing: 5 echo requests per host per minute, spread out, never a burst",
     "Built for many viewers: the page reads cached results and never triggers a ping"
   ],
-  "built_with": "Zig 0.17 and zig-libs (its icmp module: fping-style paced probing); one static binary, no libc",
+  "built_with": "Zig 0.17 and zig-libs (its icmp and traceroute modules: fping-style paced probing, unprivileged live traces); one static binary, no libc",
   "license": "MIT",
   "source": "https://github.com/zaxified/zpinger",
   "screenshot": "screenshot.png",

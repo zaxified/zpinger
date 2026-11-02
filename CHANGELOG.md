@@ -4,7 +4,7 @@ This application started in the zig-fping repository as
 `example-apps/fping-watch`; its history was carried over (`git filter-repo`),
 and these entries come from zig-fping's CHANGELOG.md.
 
-## Unreleased (0.2.0)
+## 0.2.0 (2026-11-02)
 
 - **Audit before the first public deployment.** One viewer can start at most
   4 live traces a minute, so starting and stopping in a loop no longer uses
