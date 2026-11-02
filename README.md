@@ -9,10 +9,34 @@ A small ping monitor: a daemon that pings your hosts once a minute and serves
 a web page with their status, latency and packet loss over the last 24
 hours, plus a live trace of the route to any of them. One static binary,
 shipped as a Debian package; no root needed.
+**[Try the live demo](https://zpinger.dalimilzak.cz/).**
 
 ![zpinger: eight hosts with status, tags, recent cycles and uptime; one row expanded to its 24-hour latency chart and a live trace of the route, hop by hop](doc/screenshot.png)
 
 <sub>The read-only demo (`--demo`, sample data): one target down, one row expanded with a live trace. The route is made up from documentation addresses.</sub>
+
+## Our own code, all the way down
+
+Many ping monitors are glue: they run `ping`, `fping` or `mtr`, keep the
+results in a database and put a web framework in front. zpinger has no such
+layers. From the ICMP datagram it sends to the page your browser draws, every
+piece is written in Zig for this kind of work, in this repository and in
+[zig-libs](https://github.com/zaxified/zig-libs), on nothing but Zig's
+standard library:
+
+| Layer | Code |
+|---|---|
+| ICMP probes: building, pacing, matching the replies | zig-libs `icmp` |
+| live traceroute | zig-libs `traceroute` |
+| DNS resolver | zig-libs `dns` |
+| HTTP server and limits on abusive clients | zig-libs `http`, `abuseguard`, `ratelimit` |
+| history and settings on disk | zig-libs `filestore` |
+| monitoring, the API, the web page | this repository, plain JavaScript |
+
+No C, no libc, no external programs, no database: a static binary of about
+1.1 MB. There is nothing beside it to install or keep patched, and a bug at
+any layer is ours to fix. TLS is the one thing it leaves to the reverse proxy
+in front of it.
 
 ## Install
 
