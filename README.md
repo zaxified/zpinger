@@ -35,8 +35,12 @@ standard library:
 
 No C, no libc, no external programs, no database: a static binary of about
 1.1 MB. There is nothing beside it to install or keep patched, and a bug at
-any layer is ours to fix. TLS is the one thing it leaves to the reverse proxy
-in front of it.
+any layer is ours to fix.
+
+Today zpinger serves plain HTTP and leaves HTTPS to a reverse proxy in front of
+it. That is a choice, not a gap: zig-libs has HTTP/2 and its own TLS 1.3 server
+(`tlsserver`), so serving HTTPS directly would take no outside code. zpinger
+does not enable them yet.
 
 ## Install
 
