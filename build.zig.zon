@@ -1,13 +1,13 @@
 .{
     .name = .zpinger,
     .version = "0.2.0",
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
     .fingerprint = 0x7a949a81c7030d18,
     .paths = .{ "build.zig", "build.zig.zon", "src", "tools", "deploy", "scripts", "README.md", "LICENSE", "doc" },
     .dependencies = .{
         .zig_libs = .{
-            .url = "git+https://github.com/zaxified/zig-libs.git?ref=2026-11-02#2ff0f545742866bcd77b1d9c580010a0d2fda529",
-            .hash = "zig_libs-0.0.0-WiQ0GuOIIgkzMoaRE7R-YI5w40vEd031C4TR1semIhz2",
+            .url = "git+https://github.com/zaxified/zig-libs.git?ref=main#2804bed7fed35f17e2a1bbb0d4141268ab71f6f8",
+            .hash = "zig_libs-0.0.0-WiQ0GveyWAotz5mW7kE-A0JIXeKu6wgZ8AsDbjHxOAOV",
         },
     },
 }

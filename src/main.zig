@@ -148,7 +148,9 @@ pub fn main(init: std.process.Init) !void {
     // The server binds a name and a port; the literal is checked above.
     var addr_buf: [netaddr.max_ip_text_len]u8 = undefined;
     const addr_text = netaddr.formatIp(ipOf(address), &addr_buf);
-    var admission: Admission = .{ .io = io, .gpa = gpa, .guard = .init(gpa, .{ .max_conns_per_ip = max_connections_per_ip }) };
+    // Guard.init rejects options outside their range; ours are constants inside it.
+    const guard = abuseguard.Guard.init(gpa, .{ .max_conns_per_ip = max_connections_per_ip }) catch unreachable;
+    var admission: Admission = .{ .io = io, .gpa = gpa, .guard = guard };
     defer admission.deinit();
     var server = http.Server.init(io, gpa, .{
         .handler = handle,

@@ -2,7 +2,7 @@
 
 ## Building
 
-Zig 0.17.0 (`.zigversion`); `scripts/zig-env.sh` finds it, or downloads
+Zig 0.17.1 (`.zigversion`); `scripts/zig-env.sh` finds it, or downloads
 the official build into `.zig-toolchain/` (checked against a pinned
 SHA256, no sudo). The only dependency is
 [zig-libs](https://github.com/zaxified/zig-libs), pinned to a commit in
