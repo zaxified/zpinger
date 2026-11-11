@@ -6,7 +6,7 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
-- **Built with Zig 0.17.1** (was 0.17.0) and zig-libs main `2804bed7f`. The
+- **Built with Zig 0.17.1** (was 0.17.0) and zig-libs tag `2026-11-11`. The
   0.17.1 compiler fixes a miscompile of signed-to-narrower-unsigned casts in
   optimized builds. `--listen` now also accepts an IPv6 literal with an IPv4
   tail such as `64:ff9b::192.0.2.1`; 0.17.0's parser accepted only the
