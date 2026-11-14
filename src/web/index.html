@@ -20,14 +20,12 @@
           <span class="dot"></span>
         </span>
         <h1>zpinger</h1>
-        <span id="mode" class="tag" hidden>read-only demo</span>
+        <span id="mode" class="tag" title="A read-only demo: changes are disabled" hidden>demo</span>
       </div>
       <div id="health" class="summary health-row" role="group" aria-label="Filter by health"></div>
       <span id="shown-mini" class="note"></span>
       <span class="bar-buttons">
-        <button id="events" class="bar-btn" type="button" aria-expanded="false" title="Problems of the last 24 hours, all targets">Events</button>
-        <button id="add-open" class="bar-btn" type="button" title="Add a target">+</button>
-        <button id="menu" class="bar-btn" type="button" aria-expanded="false" aria-controls="menu-body" title="Filters, order, and adding a target">☰</button>
+        <button id="menu" class="bar-btn" type="button" aria-expanded="false" aria-controls="menu-body" title="Filters, order, adding a target, and the view switches">☰</button>
       </span>
     </div>
     <div id="menu-body" class="bar-body" hidden>
@@ -38,7 +36,6 @@
           <select id="sort" aria-label="Order of the list" title="Order of the list"></select>
           <button id="order" type="button"></button>
         </span>
-        <button id="compact" class="bar-btn" type="button" aria-pressed="false" title="One line per target: more of them on a screen">Compact</button>
         <div id="tagbar" class="tagbar" role="group" aria-label="Filter by tag" hidden></div>
         <span id="shown" class="note"></span>
       </div>
@@ -52,6 +49,11 @@
         <button type="submit" title="Start probing this host, five times a minute">Add target</button>
         <span id="add-error" class="error" role="alert"></span>
       </form>
+      <!-- View switches, on a line of their own at the very end. -->
+      <div class="switches">
+        <label class="switch" title="One line per target: more of them on a screen"><input id="compact" type="checkbox" role="switch"> CompactMode</label>
+        <label class="switch" title="Problems of the last 24 hours, all targets shown, under the bar"><input id="events" type="checkbox" role="switch"> Events</label>
+      </div>
     </div>
     <div id="line" class="cycle-line" title="This cycle's probes as they come: green answered, red lost"></div>
   </header>

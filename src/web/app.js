@@ -685,15 +685,30 @@ function fillFeed(events, withName, empty) {
   return list;
 }
 
-// The global feed: the events of the targets the list shows.
+// The button that closes a feed, in its head (as Stop is in a trace's head).
+function hideButton(hint, fn) {
+  const b = el("button", "strong", "Hide events");
+  b.type = "button";
+  b.title = hint;
+  b.addEventListener("click", fn);
+  return b;
+}
+
+// The global feed: the events of the targets the list shows. The bar's
+// Events switch opens it; the switch or its Hide button closes it.
 let feedOpen = false;
+function setFeed(open) {
+  feedOpen = open;
+  if (state) render();
+}
 function renderFeed(shown) {
   const box = $("#feed");
   box.hidden = !feedOpen;
-  $("#events").setAttribute("aria-expanded", String(feedOpen));
+  $("#events").checked = feedOpen;
   if (!feedOpen) return;
   const head = el("div", "feed-head");
   head.append(el("b", null, "Events"), el("span", "note", filtered() ? `last 24 hours, the ${shown.length} targets shown` : "last 24 hours"));
+  head.append(hideButton("Hide the events (the Events switch in ☰ shows them again)", () => setFeed(false)));
   head.title = "Runs of cycles that lost probes (DOWN: some lost every probe); a single cycle that lost one probe is left out";
   box.replaceChildren(head, fillFeed(shown.flatMap(episodes), true, "Nothing went wrong."));
 }
@@ -706,13 +721,18 @@ function showTarget(id) {
   $(`[data-target="${id}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
 }
 
-// The per-target feed in a row's detail; open ones are remembered.
+// The per-target feed in a row's detail; open ones are remembered. The
+// row's Events action opens it, the Hide button in its head closes it.
 const rowFeeds = new Set();
 function renderRowFeed(box, t) {
   box.hidden = !rowFeeds.has(t.id);
   if (box.hidden) return box.replaceChildren();
   const head = el("div", "feed-head");
   head.append(el("b", null, "Events"), el("span", "note", "last 24 hours"));
+  head.append(hideButton("Hide this target's events", () => {
+    rowFeeds.delete(t.id);
+    redrawRow(t.id);
+  }));
   box.replaceChildren(head, fillFeed(episodes(t), false, "Nothing went wrong."));
 }
 
@@ -1015,23 +1035,21 @@ function renderDetail(detail, t, s) {
   const base = `api/targets/${t.id}`;
   const feed = $(".row-feed", detail);
   renderRowFeed(feed, t);
-  const events = el("button", null, rowFeeds.has(t.id) ? "Hide events" : "Events");
-  events.type = "button";
-  events.title = "This target's problems of the last 24 hours: DOWN, and loss of probes";
-  events.setAttribute("aria-expanded", String(rowFeeds.has(t.id)));
-  events.addEventListener("click", () => {
-    if (rowFeeds.has(t.id)) rowFeeds.delete(t.id);
-    else rowFeeds.add(t.id);
-    renderRowFeed(feed, t);
-    events.textContent = rowFeeds.has(t.id) ? "Hide events" : "Events";
-    events.setAttribute("aria-expanded", String(rowFeeds.has(t.id)));
-  });
-  actions.append(events);
+  if (!rowFeeds.has(t.id)) {
+    const events = el("button", null, "Events");
+    events.type = "button";
+    events.title = "This target's problems of the last 24 hours: DOWN, and loss of probes";
+    events.addEventListener("click", () => {
+      rowFeeds.add(t.id);
+      redrawRow(t.id);
+    });
+    actions.append(events);
+  }
   renderTrace($(".trace", detail), t);
   if (!traces.has(t.id))
     action("Trace route", "Show the path to this host live, hop by hop, like mtr: one probe to every hop each second, with loss and latency per hop", () => startTrace(t));
   if (t.paused) action("Resume", "Start probing this target again", () => call("POST", `${base}/resume`));
-  else action("Pause", "Stop probing this target, e.g. during maintenance; the history is kept", () => call("POST", `${base}/pause`));
+  else action("Pause", "Stop probing this target, e.g. during maintenance; the history is kept", () => call("POST", `${base}/pause`), "pause");
   if (t.status === "down" && !t.acked)
     action("Acknowledge", `Mark this outage as known: the target shows ACK instead of DOWN until ${state.ack_clear_after} cycles in a row are not DOWN`, () => call("POST", `${base}/ack`));
   if (t.acked) action("Remove acknowledgement", "Show this target as DOWN again", () => call("POST", `${base}/unack`));
@@ -1193,7 +1211,7 @@ function renderTrace(panel, t) {
   if (tr.stopped) facts.push(tr.stopped);
   if (tr.error) facts.push(tr.error);
   head.append(el("span", "note", facts.join(" · ")));
-  const again = el("button", null, tr.stopped ? "Run again" : "Stop");
+  const again = el("button", "strong", tr.stopped ? "Run again" : "Stop");
   again.type = "button";
   again.addEventListener("click", async () => {
     if (!tr.stopped) {
@@ -1797,7 +1815,7 @@ $("#menu").addEventListener("click", () => setMenu($("#menu-body").hidden));
 const COMPACT_KEY = "zpinger.compact";
 function setCompact(on) {
   document.body.classList.toggle("compact", on);
-  $("#compact").setAttribute("aria-pressed", String(on));
+  $("#compact").checked = on;
   try {
     if (on) localStorage.setItem(COMPACT_KEY, "1");
     else localStorage.removeItem(COMPACT_KEY);
@@ -1808,15 +1826,8 @@ function setCompact(on) {
 try {
   if (localStorage.getItem(COMPACT_KEY) === "1") setCompact(true);
 } catch {}
-$("#compact").addEventListener("click", () => setCompact(!document.body.classList.contains("compact")));
-$("#add-open").addEventListener("click", () => {
-  setMenu(true);
-  $("#add").name.focus();
-});
-$("#events").addEventListener("click", () => {
-  feedOpen = !feedOpen;
-  if (state) render();
-});
+$("#compact").addEventListener("change", (e) => setCompact(e.target.checked));
+$("#events").addEventListener("change", (e) => setFeed(e.target.checked));
 
 // A background tab does not poll; it catches up when shown again.
 load().then(pollLive);

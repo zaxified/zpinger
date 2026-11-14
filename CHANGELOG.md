@@ -24,12 +24,16 @@ and these entries come from zig-fping's CHANGELOG.md.
   the colour of the worst status.
 - **A floating, folded top bar.** One line: the logo, whose ring counts down
   to the next cycle (grey while the server does not answer), the `ok` and
-  `nok` pills, how many targets a filter leaves, Events, and ☰ for every
-  pill, the search, the order and the tags. A thin line along its bottom
+  `nok` pills, how many targets a filter leaves, and ☰ for every pill, the
+  search, the order, the tags, the add form and, on a line of their own at
+  the end, the CompactMode and Events switches. A read-only demo is marked
+  `demo`. A thin line along its bottom
   fills with the cycle's probes, green answered, red lost.
 - **Events.** The outages and losses of the last 24 hours, read from the
   history: under the bar for all targets shown, or in a target's detail for
-  that one, the newest on top; both hidden until asked for. A run of lossy
+  that one, the newest on top; both hidden until asked for (the Events
+  switch in ☰, a target's Events action) and closed by a highlighted
+  **Hide events** button in their head, as a trace's Stop is. A run of lossy
   cycles is one event (up to 5 clean cycles inside it do not end it), a DOWN
   one when some of its cycles lost every probe; a single cycle that lost one
   probe is left out.
@@ -57,8 +61,10 @@ and these entries come from zig-fping's CHANGELOG.md.
   a load test with slow readers); now `reason=write_aborted` at warn, like
   `body_aborted`, next to the `conn ... reason=timeout phase=write` line.
 - **New look:** less rounded corners, tighter spacing, a frosted bar (the
-  list scrolling under it shows through, blurred), and a **Compact** switch
-  in the bar: one line per target in one panel, remembered by the browser.
+  list scrolling under it shows through, blurred), and a **CompactMode**
+  switch in the bar: one line per target in one panel, remembered by the
+  browser. A trace's Stop and a feed's Hide events stand out; Pause is
+  amber.
 - **Light on the wire and in the browser, for large lists.** The page asks
   for the state only as a delta after the first load (`/api/state?since=`:
   the cycles since its own, 1.1 KB instead of 208 KB compressed per cycle at
@@ -68,7 +74,7 @@ and these entries come from zig-fping's CHANGELOG.md.
   The gap between two packets shrinks below 20 ms when a minute would not
   hold every probe otherwise (above about 580 targets). Measured up to 1000
   targets.
-- **The add form moved into the bar** (☰, or `+` to go straight to it); the
+- **The add form moved into the bar** (☰); the
   footer links to zpinger. The beat strips are fitted to their real width
   (a strip drawn before its row was in the page had about ten beats more).
 - **`--demo` keeps 12 hours of real data** (was 1 hour; half the history, so

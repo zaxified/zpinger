@@ -67,8 +67,10 @@ with the previous pin: a new default-on feature in a module arrives silently.
   (0 faint), OR among themselves, AND with tags and search; counts are facets.
 - The top bar floats (sticky) and is folded by default (owner, 2026-11-14): its one line
   holds the logo (its ring counts down to the next cycle, grey when the server does not
-  answer), the `ok · nok` pills, "N of M shown" while filtered, Events and ☰; unfolded it
-  adds every pill, search, order and tags (the browser remembers it unfolded). A 3 px line
+  answer), the `ok · nok` pills, "N of M shown" while filtered, and ☰; unfolded it
+  adds every pill, search, order, tags, the add form and last, on a line of their own, the
+  CompactMode and Events switches (owner 2026-11-14; the browser remembers it unfolded).
+  The read-only mode tag says just `demo`. A 3 px line
   along its bottom is the cycle's probing window, coloured probe by probe until full; no
   text in it (owner: text there is distracting).
 - Live (owner, 2026-11-14): the probes are spread over the cycle; a row's newest beat is
@@ -76,11 +78,13 @@ with the previous pin: a new default-on feature in a module arrives silently.
   the strip, a recorded beat "arrives", a status change flashes the row; the tab title
   counts nok targets and the favicon takes the worst colour.
 - Events (global under the bar, per target in the detail) are hidden by default; newest
-  (latest start) on top.
-- The add form lives in the unfolded bar (☰, or `+` in the folded row); the 3 px line sits
+  (latest start) on top. Opened by the Events switch / the row's Events action, closed by a
+  highlighted "Hide events" in the feed's head, like Stop in a trace's head (owner 2026-11-14:
+  Stop and Hide events stand out; Pause has amber text).
+- The add form lives in the unfolded bar (☰; no `+` shortcut, owner 2026-11-14); the 3 px line sits
   inside the bar, which closes below it (owner: the line over the list was distracting).
 - Look (owner 2026-11-14): corners `--r-card` 6 px / `--r-ctl` / `--r-chip` 5 px, frosted bar
-  (82 % card colour + blur), Compact switch (one line per target, localStorage), rows cached
+  (82 % card colour + blur), CompactMode switch (one line per target, localStorage), rows cached
   and updated in place (`rowSig` decides a rebuild), drawn 20 at a time (`PAGE`).
 - Target limit: 200 by default (tested and tuned); `ZPINGER_MAX_TARGETS` raises it for testing only.
 - Scale (measured 2026-11-14, netns sim up to 1000 targets with a cap-raised test build): the
