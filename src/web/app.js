@@ -362,6 +362,7 @@ function render(anim) {
   // shorter for a moment would have moved a reader scrolled down.
   const y = window.scrollY;
   const list = $("#targets");
+  fitWhoColumn(list);
   for (const p of list.querySelectorAll(":scope > p")) p.remove();
   lastShown = shown;
   const drawn = shown.slice(0, rowLimit);
@@ -388,6 +389,7 @@ function render(anim) {
   }
   // Fill what a new state (or a new width) changed, now that the rows are
   // in the page: how many beats fit, and a chart, depend on the width.
+  let box;
   for (const t of drawn) {
     const r = rows.get(t.id);
     if (r.state === state && r.gen === layoutGen) {
@@ -396,6 +398,8 @@ function render(anim) {
       if (open === $(".detail", r.node).hidden) showDetail(r.node, open);
       continue;
     }
+    box ??= whoBox(list); // one layout, before any row is changed
+    fitWhoText(r.node, t, box);
     updateRow(r.node, t, stats.get(t.id), r.state === null ? null : anim);
     r.state = state;
     r.gen = layoutGen;
@@ -425,6 +429,60 @@ function redrawRow(id) {
   const r = rows.get(id);
   if (r) r.state = null;
   render();
+}
+
+// The name/address column is as wide as the longest name or address of all
+// targets (not just the ones shown: a filter does not move the strips),
+// within bounds, the same in every row so the beat strips line up. A fixed
+// width cut long IPv6 addresses with room to spare on the right.
+let measureCtx = null, whoWidth = "";
+function fitWhoColumn(list) {
+  measureCtx ??= document.createElement("canvas").getContext("2d");
+  const family = getComputedStyle(document.body).fontFamily;
+  const width = (font, text) => {
+    measureCtx.font = `${font} ${family}`;
+    return measureCtx.measureText(text).width;
+  };
+  let wide = 0, compact = 0;
+  textWidths.clear();
+  for (const t of state.targets) {
+    const w = { name: width("600 15px", t.name), host: width("13px", t.host), hostC: width("12px", t.host) };
+    textWidths.set(t.id, w);
+    wide = Math.max(wide, w.name + WHO_NAME_EXTRA, w.host);
+    compact = Math.max(compact, w.name + w.hostC + WHO_ROW_EXTRA);
+  }
+  const px = (v, lo, hi) => `${Math.ceil(Math.min(hi, Math.max(lo, v + 4)))}px`;
+  const key = `${px(wide, 140, 360)} ${px(compact, 180, 520)}`;
+  if (key === whoWidth) return;
+  whoWidth = key;
+  list.style.setProperty("--who-w", px(wide, 140, 360));
+  list.style.setProperty("--who-cw", px(compact, 180, 520));
+  layoutGen++; // the strips get a new width: refit their beats
+}
+// Beside the name: its ✎ button; in a compact row also the gaps and the
+// tag button.
+const WHO_NAME_EXTRA = 26, WHO_ROW_EXTRA = 26 + 8 + 8 + 30;
+const textWidths = new Map(); // target id -> widths of its name and host at full size
+// The column as the rows have it now: its width, and whether name and host
+// share a line (a compact row on a wide screen).
+const whoBox = (list) => {
+  const who = list.querySelector(".target .who");
+  return who && { w: who.clientWidth, row: getComputedStyle(who).flexDirection === "row" };
+};
+// A name or address the column cannot hold is set smaller (down to 78 %)
+// rather than cut; only past that does the ellipsis cut it.
+function fitWhoText(node, t, box) {
+  const w = textWidths.get(t.id);
+  if (!w || !box) return;
+  const scale = (room, need) => (need <= room ? 1 : Math.max(0.78, room / need));
+  let sn, sh;
+  if (box.row) sn = sh = scale(box.w - WHO_ROW_EXTRA, w.name + w.hostC);
+  else {
+    sn = scale(box.w - WHO_NAME_EXTRA, w.name);
+    sh = scale(box.w, w.host);
+  }
+  node.style.setProperty("--sn", sn.toFixed(3));
+  node.style.setProperty("--sh", sh.toFixed(3));
 }
 
 const PAGE = 20;
@@ -1051,7 +1109,7 @@ function renderDetail(detail, t, s) {
   if (t.paused) action("Resume", "Start probing this target again", () => call("POST", `${base}/resume`));
   else action("Pause", "Stop probing this target, e.g. during maintenance; the history is kept", () => call("POST", `${base}/pause`), "pause");
   if (t.status === "down" && !t.acked)
-    action("Acknowledge", `Mark this outage as known: the target shows ACK instead of DOWN until ${state.ack_clear_after} cycles in a row are not DOWN`, () => call("POST", `${base}/ack`));
+    action("Acknowledge", `Mark this outage as known: the target shows ACK instead of DOWN until ${state.ack_clear_after} cycles in a row are not DOWN`, () => call("POST", `${base}/ack`), "ack");
   if (t.acked) action("Remove acknowledgement", "Show this target as DOWN again", () => call("POST", `${base}/unack`));
   action("Remove", "Stop monitoring this target and delete its history",
     () => (state.read_only || confirm(`Remove ${t.name}?`)) && call("DELETE", base).then(() => view.open.delete(t.id)), "danger");

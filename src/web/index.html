@@ -32,10 +32,6 @@
       <div id="summary" class="summary" role="group" aria-label="Filter by status"></div>
       <div class="toolbar">
         <input id="find" type="search" placeholder="Find a name, host or tag" aria-label="Find a target" maxlength="100">
-        <span class="order">
-          <select id="sort" aria-label="Order of the list" title="Order of the list"></select>
-          <button id="order" type="button"></button>
-        </span>
         <div id="tagbar" class="tagbar" role="group" aria-label="Filter by tag" hidden></div>
         <span id="shown" class="note"></span>
       </div>
@@ -49,8 +45,13 @@
         <button type="submit" title="Start probing this host, five times a minute">Add target</button>
         <span id="add-error" class="error" role="alert"></span>
       </form>
-      <!-- View switches, on a line of their own at the very end. -->
+      <!-- The view: the order and the switches, on a line of their own at
+           the very end. -->
       <div class="switches">
+        <span class="order">
+          <select id="sort" aria-label="Order of the list" title="Order of the list"></select>
+          <button id="order" type="button"></button>
+        </span>
         <label class="switch" title="One line per target: more of them on a screen"><input id="compact" type="checkbox" role="switch"> CompactMode</label>
         <label class="switch" title="Problems of the last 24 hours, all targets shown, under the bar"><input id="events" type="checkbox" role="switch"> Events</label>
       </div>

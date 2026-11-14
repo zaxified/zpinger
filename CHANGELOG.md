@@ -25,8 +25,8 @@ and these entries come from zig-fping's CHANGELOG.md.
 - **A floating, folded top bar.** One line: the logo, whose ring counts down
   to the next cycle (grey while the server does not answer), the `ok` and
   `nok` pills, how many targets a filter leaves, and ☰ for every pill, the
-  search, the order, the tags, the add form and, on a line of their own at
-  the end, the CompactMode and Events switches. A read-only demo is marked
+  search, the tags, the add form and, on a line of their own at the end,
+  the order and the CompactMode and Events switches. A read-only demo is marked
   `demo`. A thin line along its bottom
   fills with the cycle's probes, green answered, red lost.
 - **Events.** The outages and losses of the last 24 hours, read from the
@@ -63,8 +63,12 @@ and these entries come from zig-fping's CHANGELOG.md.
 - **New look:** less rounded corners, tighter spacing, a frosted bar (the
   list scrolling under it shows through, blurred), and a **CompactMode**
   switch in the bar: one line per target in one panel, remembered by the
-  browser. A trace's Stop and a feed's Hide events stand out; Pause is
-  amber.
+  browser; a compact row leaves out the tags. The name/address column is
+  as wide as the longest name or address (within bounds, the same in every
+  row), and one that still does not fit is set smaller rather than cut, so
+  IPv6 addresses show whole. The figures in a target's detail are denser.
+  A trace's Stop and a feed's Hide events stand out; Pause is amber,
+  Acknowledge grey-green.
 - **Light on the wire and in the browser, for large lists.** The page asks
   for the state only as a delta after the first load (`/api/state?since=`:
   the cycles since its own, 1.1 KB instead of 208 KB compressed per cycle at

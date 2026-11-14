@@ -13,6 +13,8 @@
   --accent: #2f80ed;
   /* Amber text that still reads on the light ground (--warn is too light). */
   --warn-text: #a86400;
+  /* Grey-green text (Acknowledge). */
+  --sage: #4f7d66;
   /* Corners (owner 2026-11-14: less rounded): cards, controls, chips. */
   --r-card: 6px;
   --r-ctl: 5px;
@@ -29,6 +31,7 @@
     --empty: #2b323b;
     --accent: #58a6ff;
     --warn-text: #f0a020;
+    --sage: #8fbfa5;
     color-scheme: dark;
   }
 }
@@ -132,7 +135,9 @@ button.pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
    covers it, under the edit controls (later siblings, positioned). */
 .head {
   position: relative; cursor: pointer;
-  display: grid; grid-template-columns: auto minmax(120px, 220px) 1fr auto;
+  /* --who-w: the longest name or address (app.js fitWhoColumn), leaving
+     the beats their room on a narrower window. */
+  display: grid; grid-template-columns: auto min(var(--who-w, 220px), 34%) 1fr auto;
   align-items: center; gap: 16px; padding: 14px 18px;
 }
 .head > :not(.expand) { position: relative; }
@@ -147,7 +152,9 @@ button.pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .who { display: flex; flex-direction: column; min-width: 0; }
 .line { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.host { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* --sn, --sh: a name or address set smaller to fit (app.js fitWhoText). */
+.who .name { font-size: calc(15px * var(--sn, 1)); }
+.host { color: var(--muted); font-size: calc(13px * var(--sh, 1)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tagline { margin-top: 3px; }
 .tags { display: flex; gap: 4px; overflow: hidden; }
 .tags[hidden] { display: none; }
@@ -258,8 +265,8 @@ button.pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   background: var(--card); border: 1px solid var(--line); border-radius: 8px;
   padding: 4px 8px; font-size: 12px; box-shadow: 0 4px 12px rgb(0 0 0 / 0.12);
 }
-.stats { display: flex; flex-wrap: wrap; gap: 24px; margin-top: 12px; font-size: 13px; color: var(--muted); }
-.stats b { display: block; color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }
+.stats { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-top: 10px; font-size: 12px; line-height: 1.3; color: var(--muted); }
+.stats b { display: block; color: var(--text); font-size: 14px; font-variant-numeric: tabular-nums; }
 /* A thin rule sets the trace apart from the statistics above it. */
 .trace { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .trace-head { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; font-size: 14px; }
@@ -310,6 +317,7 @@ button, input { font: inherit; }
 .actions button:hover, .add > button:hover { border-color: var(--accent); }
 .actions .danger { color: var(--down); }
 .actions .pause { color: var(--warn-text); font-weight: 600; }
+.actions .ack { color: var(--sage); font-weight: 600; }
 .note { color: var(--muted); font-size: 13px; align-self: center; }
 
 /* Tag picker, after GitHub's label picker. */
@@ -348,7 +356,7 @@ button, input { font: inherit; }
 .error.demo { color: var(--muted); }
 /* View switches (CompactMode, Events): a line of their own at the end of
    the unfolded bar; a checkbox drawn as a sliding switch. */
-.switches { display: flex; flex-wrap: wrap; gap: 8px 22px; padding-top: 10px; border-top: 1px solid var(--line); }
+.switches { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px; padding-top: 10px; border-top: 1px solid var(--line); }
 .switch { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; user-select: none; }
 .switch input {
   appearance: none; -webkit-appearance: none; margin: 0; flex: none; cursor: pointer;
@@ -370,6 +378,8 @@ footer a { color: inherit; }
 @media (max-width: 720px) {
   .head { grid-template-columns: auto 1fr auto; gap: 10px 12px; padding: 12px 14px; }
   .beats { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; }
+  /* The figures need no aligned width here: the room goes to the name. */
+  .figures { min-width: 0; }
   /* Phone: the name goes under the address, both cut to fit, so the
      minigraph and the loss stay on screen without scrolling. */
   .hops td.hop-host .hop-addr { flex-direction: column; gap: 0; max-width: 38vw; }
@@ -391,22 +401,27 @@ body.compact .target { border: 0; border-bottom: 1px solid var(--line); border-r
 body.compact .target:last-of-type { border-bottom: 0; }
 body.compact .target:has(.tag-popover) { overflow: visible; }
 body.compact .head:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
-body.compact .head { grid-template-columns: 58px minmax(180px, 300px) 1fr auto; gap: 14px; padding: 7px 14px; }
+body.compact .head { grid-template-columns: 58px min(var(--who-cw, 300px), 45%) 1fr auto; gap: 14px; padding: 7px 14px; }
 body.compact .who { flex-direction: row; align-items: baseline; gap: 8px; overflow: hidden; }
-body.compact .who .line:first-child { flex: none; max-width: 50%; }
-body.compact .host { font-size: 12px; flex: none; max-width: 40%; }
-body.compact .tagline { margin-top: 0; min-width: 0; }
+/* Short of room, the name gives way before the address. */
+body.compact .who .line:first-child { flex: 0 1 auto; }
+body.compact .host { font-size: calc(12px * var(--sh, 1)); flex: none; max-width: 75%; }
+/* No tags in a compact row: only the button that edits them, on hover. */
+body.compact .target .tagline { margin-top: 0; flex: none; }
+body.compact .target .tags { display: none; }
 body.compact .badge { min-width: 52px; padding: 1px 6px; font-size: 11px; }
 body.compact .beats { height: 16px; gap: 3px; }
 body.compact .beat { flex-basis: 5px; border-radius: 1px; }
 body.compact .figures { flex-direction: row; gap: 12px; align-items: baseline; min-width: 130px; justify-content: flex-end; }
 body.compact .uptime { font-size: 13px; }
-body.compact .detail { background: var(--bg); }
+body.compact .detail { background: var(--bg); padding: 12px 14px 14px; }
+body.compact .stats { gap: 4px 16px; margin-top: 8px; }
+body.compact .stats b { font-size: 13px; }
 @media (max-width: 720px) {
   body.compact .head { grid-template-columns: 52px 1fr auto; gap: 4px 10px; padding: 8px 10px; }
   body.compact .who { flex-direction: column; gap: 0; }
   body.compact .who .line:first-child, body.compact .host { max-width: 100%; }
-  body.compact .tagline { display: none; }
+  body.compact .target .tagline { display: none; }
   body.compact .beats { grid-row: 2; grid-column: 1 / -1; }
   body.compact .figures { flex-direction: column; gap: 0; min-width: 0; }
 }
