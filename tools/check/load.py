@@ -142,8 +142,8 @@ async def viewer(i, port, until, phase="viewers"):
                         finding(phase, f"delta since={ds['since']} (had {end}) series of {want}?")
                 elif ds["end"] != end:
                     # A whole state for a since off the series: allowed only
-                    # when ours is older than the series.
-                    if ds["end"] - end < 1440 * ds["cycle_s"]:
+                    # when ours is older than a delta reaches (60 cycles).
+                    if ds["end"] - end < 60 * ds["cycle_s"]:
                         finding(phase, f"whole state for since={end}, end now {ds['end']}")
                 if len(ds["targets"]) != n_targets and phase != "writers":
                     finding(phase, f"delta with {len(ds['targets'])} targets, had {n_targets}")
