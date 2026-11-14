@@ -641,9 +641,11 @@ pub const Monitor = struct {
             const scenario = target.scenario orelse continue;
             // This target's real data starts at its first real cycle in the
             // window: a target added to the list later gets sample data up
-            // to its own start, not a gap. Not probed yet: up to now.
+            // to its own start, not a gap. Not probed yet: up to now. The
+            // search starts at the last fill's boundary: below it the slots
+            // hold that fill's sample data, which looks like real cycles.
             var own = t + m.cycle_s;
-            var at = live_from;
+            var at = @max(live_from, target.demo_from);
             while (at <= t) : (at += m.cycle_s) {
                 if (target.history[m.slot(at)].t == at) {
                     own = at;
@@ -1686,6 +1688,13 @@ test "demo: a target added later gets sample data up to its own first cycle" {
     try testing.expectEqual(probes_per_cycle, sample.sent);
     try testing.expectEqual(5, new.history[m.slot(hour + 2 * 3600)].recv);
     try testing.expectEqual(5, old.history[m.slot(hour + 3600)].recv);
+    // The next fills do not take that sample data for real cycles.
+    for (0..3) |_| {
+        m.demo_hour = 0;
+        m.demoFillLocked(hour + 3 * 3600 - 60);
+        try testing.expectEqual(hour + 2 * 3600, new.demo_from);
+        try testing.expectEqual(hour, old.demo_from);
+    }
     // A target not probed yet is sample data up to now.
     _ = try m.add("later", "192.0.2.3", &.{});
     const later = m.targets.items[2];
