@@ -33,6 +33,25 @@ and these entries come from zig-fping's CHANGELOG.md.
   cycles is one event (up to 5 clean cycles inside it do not end it), a DOWN
   one when some of its cycles lost every probe; a single cycle that lost one
   probe is left out.
+- **Up to 200 targets** (was 64), the number zpinger is now measured and
+  tuned for; `ZPINGER_MAX_TARGETS` raises it for testing (a warning at
+  start). A big history is written every few cycles instead of every one:
+  about a megabyte a minute at most (8.6 MB at 200 targets every 9 cycles,
+  not every minute).
+- **Rows are updated in place, and drawn 20 at a time.** A new cycle
+  changes a row's beats, figures and open detail without building the list
+  again; only a row whose name, host, tags or status changed is rebuilt.
+  Only the first 20 rows matching the filter are drawn, 20 more as the
+  reader scrolls near the end, and each target's figures are computed once
+  per state, in one pass: at 200 targets a keystroke in the search takes
+  6 ms, a new cycle 22 ms (measured in headless Chrome).
+- **A client that stops reading the answer is no longer logged as a server
+  error.** It was `handler_failed error=WriteFailed` at level err (found by
+  a load test with slow readers); now `reason=write_aborted` at warn, like
+  `body_aborted`, next to the `conn ... reason=timeout phase=write` line.
+- **New look:** less rounded corners, tighter spacing, a frosted bar (the
+  list scrolling under it shows through, blurred), and a **Compact** switch
+  in the bar: one line per target in one panel, remembered by the browser.
 - **Light on the wire and in the browser, for large lists.** The page asks
   for the state only as a delta after the first load (`/api/state?since=`:
   the cycles since its own, 1.1 KB instead of 208 KB compressed per cycle at
@@ -41,7 +60,7 @@ and these entries come from zig-fping's CHANGELOG.md.
   tooltips written on hover: a redraw at 64 targets takes 91 ms (was 468).
   The gap between two packets shrinks below 20 ms when a minute would not
   hold every probe otherwise (above about 580 targets). Measured up to 1000
-  targets with a test build (the limit stays 64).
+  targets.
 - **The add form moved into the bar** (☰, or `+` to go straight to it); the
   footer links to zpinger. The beat strips are fitted to their real width
   (a strip drawn before its row was in the page had about ten beats more).

@@ -108,9 +108,18 @@ Not there yet; know them before you expose it:
 - **No TLS.** HTTP/1.1 with keep-alive, each connection on its own thread. A
   reverse proxy in front provides TLS, and the host's protection (CrowdSec,
   fail2ban) per-client request limits.
-- **At most 64 targets**, one address per name (the preferred one, in
-  getaddrinfo's RFC 6724 order).
-- History is saved as JSON after every cycle (about 400 KB for 10 targets).
+- **At most 200 targets**, one address per name (the preferred one, in
+  getaddrinfo's RFC 6724 order). 200 is what the defaults are measured and
+  tuned for: 1000 probes a minute (about 17 packets a second, at least 20 ms
+  apart), a state delta of about 3 KB a cycle to each open page, a full
+  page redraw in a fraction of a second. `ZPINGER_MAX_TARGETS` raises the
+  limit, up to 10 000, for testing: probing was measured to hold 1000
+  targets (the gap between packets shrinks below 20 ms above about 580),
+  the page was not tuned for more than 200.
+- History is saved as JSON after every cycle (about 400 KB for 10 targets),
+  or every few cycles when it is bigger: about a megabyte a minute at most
+  (8.6 MB every 9 cycles at 200 targets). A crash or restart loses the
+  cycles since the last write.
 
 ## Many viewers, and the open internet
 

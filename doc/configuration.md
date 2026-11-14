@@ -10,6 +10,7 @@ commented out); after a change, `systemctl restart zpinger`.
 | `ZPINGER_LISTEN` | `127.0.0.1:8080` | the web server address |
 | `ZPINGER_TARGETS` | `/var/lib/zpinger/targets.json` | the target list; the page saves its changes there. A read-only instance points it at a file you manage, such as `/etc/zpinger/targets.json` |
 | `ZPINGER_OPTS` | (none) | further [options](#options), such as `--read-only` or `--allow-host NAME` |
+| `ZPINGER_MAX_TARGETS` | `200` | how many targets the list may hold. 200 is what zpinger is tested and tuned for ([how-it-works.md](how-it-works.md#limits)); more (up to 10 000) is for testing, and logs a warning at start |
 
 The history is kept in `/var/lib/zpinger/history.json`.
 

@@ -114,8 +114,12 @@ pub const StateTag = struct {
     end: i64,
 };
 
-/// Upper bound on targets: this is a small demo, not a monitoring system.
-pub const max_targets = 64;
+/// Targets at most, unless `ZPINGER_MAX_TARGETS` says otherwise: the
+/// number the defaults are measured and tuned for (probing, the page, the
+/// data on the wire; doc/how-it-works.md § Limits).
+pub const default_max_targets = 200;
+/// What `ZPINGER_MAX_TARGETS` may raise it to (untested above the default).
+pub const max_targets_ceiling = 10_000;
 /// Tags per target, and bytes per tag.
 pub const max_tags = 8;
 pub const max_tag_len = 32;
@@ -125,6 +129,8 @@ pub const Monitor = struct {
     io: Io,
     mutex: Io.Mutex = .init,
     targets: std.ArrayList(*Target) = .empty,
+    /// See `default_max_targets`.
+    max_targets: u32 = default_max_targets,
     next_id: u32 = 1,
     cycle_s: i64 = 60,
     /// How long the last address of a name is probed while DNS does not
@@ -163,6 +169,9 @@ pub const Monitor = struct {
     /// holds up the page or the probing loop.
     pending_config: ?[]u8 = null,
     pending_history: ?[]u8 = null,
+    /// Cycles to let pass before the history is written again (see
+    /// `saveHistoryLocked`).
+    history_wait: u32 = 0,
     /// Serializes `flushSaves`: files are written one at a time, each the
     /// newest serialization when its turn came, so an older one never lands
     /// over a newer one.
@@ -260,7 +269,7 @@ pub const Monitor = struct {
 
     /// `tags` must have passed `validateTags`.
     fn addLocked(m: *Monitor, id: u32, name: []const u8, host: []const u8, tags: []const []const u8) (Error || error{OutOfMemory})!u32 {
-        if (m.targets.items.len >= max_targets) return error.TooManyTargets;
+        if (m.targets.items.len >= m.max_targets) return error.TooManyTargets;
         const t = try m.gpa.create(Target);
         errdefer m.gpa.destroy(t);
         const name_copy = try m.gpa.dupe(u8, name);
@@ -483,9 +492,9 @@ pub const Monitor = struct {
         m.live_cycle = t;
         m.live.clearRetainingCapacity();
         m.live_ids.clearRetainingCapacity();
-        m.live.ensureTotalCapacity(m.gpa, max_targets * probes_per_cycle) catch return;
-        m.live_ids.ensureTotalCapacity(m.gpa, max_targets) catch return;
-        for (jobs) |job| if (job.addr != null and m.live_ids.items.len < max_targets)
+        m.live.ensureTotalCapacity(m.gpa, @as(usize, m.max_targets) * probes_per_cycle) catch return;
+        m.live_ids.ensureTotalCapacity(m.gpa, m.max_targets) catch return;
+        for (jobs) |job| if (job.addr != null and m.live_ids.items.len < m.max_targets)
             m.live_ids.appendAssumeCapacity(job.id);
     }
 
@@ -647,7 +656,7 @@ pub const Monitor = struct {
     };
 
     pub fn loadConfig(m: *Monitor) !void {
-        const bytes = Io.Dir.cwd().readFileAlloc(m.io, m.config_path, m.gpa, .limited(1 << 20)) catch |err| switch (err) {
+        const bytes = Io.Dir.cwd().readFileAlloc(m.io, m.config_path, m.gpa, .limited(@max(1 << 20, @as(usize, m.max_targets) * 1024))) catch |err| switch (err) {
             // A writable instance starts empty and writes the file on the
             // first change; a read-only one would show nothing, forever.
             error.FileNotFound => if (m.read_only) return err else return,
@@ -698,7 +707,7 @@ pub const Monitor = struct {
 
     pub fn loadHistory(m: *Monitor) !void {
         const path = m.history_path orelse return;
-        const bytes = Io.Dir.cwd().readFileAlloc(m.io, path, m.gpa, .limited(8 << 20)) catch |err| switch (err) {
+        const bytes = Io.Dir.cwd().readFileAlloc(m.io, path, m.gpa, .limited(@max(8 << 20, @as(usize, m.max_targets) * history_len * 48))) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return err,
         };
@@ -746,8 +755,16 @@ pub const Monitor = struct {
         }
     }
 
+    /// After every cycle, or every few cycles for a big history: about a
+    /// megabyte written a minute at most (an fsync'd 8.6 MB a minute at 200
+    /// targets was 12 GB a day). A crash or restart loses the cycles since
+    /// the last write, at most 15.
     fn saveHistoryLocked(m: *Monitor) void {
         if (m.history_path == null) return;
+        if (m.history_wait > 0) {
+            m.history_wait -= 1;
+            return;
+        }
         var aw: Io.Writer.Allocating = .init(m.gpa);
         defer aw.deinit();
         const w = &aw.writer;
@@ -766,6 +783,7 @@ pub const Monitor = struct {
             w.writeAll("]}") catch return;
         }
         w.writeAll("]}\n") catch return;
+        m.history_wait = @intCast(@min(14, aw.written().len / (1 << 20)));
         replacePending(m.gpa, &m.pending_history, aw.toOwnedSlice() catch return);
     }
 
@@ -1263,7 +1281,8 @@ fn probe(m: *Monitor, jobs: []Job, t: i64, window_ns: u64) !void {
     defer pinger.deinit();
 
     // Pinger target ids are dense indexes; map them back to jobs.
-    var index: [max_targets]*Job = undefined;
+    const index = try m.gpa.alloc(*Job, jobs.len);
+    defer m.gpa.free(index);
     var n: usize = 0;
     for (jobs) |*job| {
         const addr = job.addr orelse continue;
@@ -1274,7 +1293,7 @@ fn probe(m: *Monitor, jobs: []Job, t: i64, window_ns: u64) !void {
     if (n == 0) return;
 
     const Collect = struct {
-        map: *[max_targets]*Job,
+        map: []*Job,
         m: *Monitor,
         t: i64,
 
@@ -1293,7 +1312,7 @@ fn probe(m: *Monitor, jobs: []Job, t: i64, window_ns: u64) !void {
             c.m.noteLive(c.t, job.id, rtt_us);
         }
     };
-    var collect: Collect = .{ .map = &index, .m = m, .t = t };
+    var collect: Collect = .{ .map = index, .m = m, .t = t };
     pinger.setResultCallback(&collect, Collect.onResult);
     try pinger.run();
     for (index[0..n], 0..) |job, id| job.sent = @intCast(pinger.stats(@intCast(id)).sent);
@@ -1399,6 +1418,16 @@ test "the state is built once per change and shared" {
     const plain = try dec.reader.allocRemaining(testing.allocator, .unlimited);
     defer testing.allocator.free(plain);
     try testing.expectEqualStrings(second.json, plain);
+}
+
+test "the target limit: 200 by default, set at start" {
+    var m = testMonitor();
+    defer m.deinit();
+    try testing.expectEqual(@as(u32, 200), m.max_targets);
+    m.max_targets = 2;
+    _ = try m.add("a", "192.0.2.1", &.{});
+    _ = try m.add("b", "192.0.2.2", &.{});
+    try testing.expectError(error.TooManyTargets, m.add("c", "192.0.2.3", &.{}));
 }
 
 test "a delta: the series from since on, shared, and the whole state when since is off" {

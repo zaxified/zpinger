@@ -17,3 +17,7 @@
 #   ZPINGER_TARGETS=/usr/share/zpinger/demo-targets.json
 #   ZPINGER_OPTS=--demo
 #ZPINGER_OPTS=
+
+# How many targets the list may hold. 200 is what zpinger is tested and
+# tuned for; more is for testing only.
+#ZPINGER_MAX_TARGETS=200

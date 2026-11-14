@@ -11,7 +11,8 @@ const Io = std.Io;
 const http = @import("http");
 const abuseguard = @import("abuseguard");
 const Status = std.http.Status;
-const Monitor = @import("monitor.zig").Monitor;
+const monitor_mod = @import("monitor.zig");
+const Monitor = monitor_mod.Monitor;
 const StateTag = @import("monitor.zig").StateTag;
 const Tracer = @import("trace.zig").Tracer;
 const trace = @import("trace.zig");
@@ -141,7 +142,19 @@ pub fn main(init: std.process.Init) !void {
     if (trace_idle) |v| tracer_state.limits.idle_s = v;
     if (trace_age) |v| tracer_state.limits.max_age_s = v;
     tracer = &tracer_state;
-    monitor.loadConfig() catch |err| fatal(io, "cannot load the targets from {s}: {t}", .{ monitor.config_path, err });
+    // The target limit (doc/configuration.md): 200, tested and tuned for;
+    // more only for testing.
+    if (init.environ_map.get("ZPINGER_MAX_TARGETS")) |v| {
+        const n = std.fmt.parseInt(u32, v, 10) catch 0;
+        if (n < 1 or n > monitor_mod.max_targets_ceiling) return fail(io, "ZPINGER_MAX_TARGETS must be 1 to 10000");
+        monitor.max_targets = n;
+        if (n > monitor_mod.default_max_targets)
+            log.warn("ZPINGER_MAX_TARGETS={d}: more targets than the {d} zpinger is tested for", .{ n, monitor_mod.default_max_targets });
+    }
+    monitor.loadConfig() catch |err| switch (err) {
+        error.TooManyTargets => fatal(io, "{s} lists more than {d} targets (ZPINGER_MAX_TARGETS)", .{ monitor.config_path, monitor.max_targets }),
+        else => fatal(io, "cannot load the targets from {s}: {t}", .{ monitor.config_path, err }),
+    };
     monitor.loadHistory() catch |err| fatal(io, "cannot load the history from {s}: {t} (move it away to start afresh)", .{ monitor.history_path.?, err });
 
     const address = Io.net.IpAddress.parseLiteral(listen_text) catch return fail(io, "bad --listen");
@@ -351,10 +364,14 @@ fn ipOf(address: Io.net.IpAddress) netaddr.Ip {
 fn onError(_: ?*anyopaque, kind: http.Server.ErrorKind, err: ?anyerror, status: u16, peer: ?Io.net.IpAddress) void {
     switch (kind) {
         .request_refused => _ = events.emit(.warn, .http, .client, if (peer) |p| .of(ipOf(p)) else null, "status={d} reason=bad_request_head", .{status}),
-        // The client hung up inside its body: not a fault on this side, and
-        // anyone could fill the error log with it.
+        // The client hung up inside its body, or stopped reading the answer
+        // (it hung up, or the write deadline cut a slow reader off: a
+        // `timed_out` line says so too): not a fault on this side, and anyone
+        // could fill the error log with it.
         .handler_failed, .server_failed => if (kind == .handler_failed and (err orelse error.Unknown) == error.ReadFailed) {
             _ = events.emit(.warn, .http, .client, if (peer) |p| .of(ipOf(p)) else null, "status={d} reason=body_aborted", .{status});
+        } else if (kind == .handler_failed and (err orelse error.Unknown) == error.WriteFailed) {
+            _ = events.emit(.warn, .http, .client, if (peer) |p| .of(ipOf(p)) else null, "status={d} reason=write_aborted", .{status});
         } else {
             _ = events.emit(.err, .http, .client, if (peer) |p| .of(ipOf(p)) else null, "status={d} reason={t} error={t}", .{
                 status, kind, err orelse error.Unknown,
@@ -833,7 +850,7 @@ fn sendMonitorError(rw: *ResponseWriter, err: anyerror) !void {
         error.InvalidName => sendError(rw, .bad_request, "invalid_name", "name: 1-64 printable characters"),
         error.InvalidHost => sendError(rw, .bad_request, "invalid_host", "host: an IP address or a DNS name"),
         error.InvalidTags => sendError(rw, .bad_request, "invalid_tags", "tags: at most 8, each 1-32 characters, no spaces or commas"),
-        error.TooManyTargets => sendError(rw, .conflict, "too_many_targets", "too many targets"),
+        error.TooManyTargets => sendError(rw, .conflict, "too_many_targets", "too many targets: the limit is set by ZPINGER_MAX_TARGETS (default 200)"),
         error.NotDown => sendError(rw, .conflict, "not_down", "only a DOWN target can be acknowledged"),
         else => err,
     };

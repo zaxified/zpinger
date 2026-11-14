@@ -56,6 +56,7 @@ event=http client=198.51.100.7 peer=127.0.0.1 status=429 reason=trace_rate metho
 | `trace_viewer_limit`, `trace_rate` | 429 | the client watches 2 traces already; it started 4, or everybody 10, in the last minute |
 | `trace_cap`, `trace_disabled` | 503, 403 | `--trace-max` traces running; traces are off |
 | `body_aborted` | 500 | the client hung up inside its request body (nobody reads this status) |
+| `write_aborted` | 0 (or what went out) | the client stopped reading the answer: it hung up, or the write deadline cut a slow reader off (a `conn action=closed reason=timeout phase=write` line follows) |
 | `handler_failed`, `server_failed` | 500, 503 | a fault on the server's side (logged as errors) |
 
 `--log-level warn` keeps the refusals and drops the rest (starts, audits,

@@ -81,7 +81,8 @@ reverse proxy, CrowdSec ([deploying](doc/deploying.md)).
 - problems first: DOWN, then losing probes now, then a problem in the last
   hour or day ([how it works](doc/how-it-works.md));
 - tags, search, sorting and status filters, kept in the URL so a view can be
-  bookmarked; names and tags edited in place;
+  bookmarked; names and tags edited in place; a compact view for long lists
+  (up to 200 hosts);
 - pause a host, or **acknowledge** an outage until it is over;
 - `--read-only` for a public demo, `--demo` with sample history that shows
   what problems look like.

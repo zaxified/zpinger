@@ -108,7 +108,6 @@ const beatColor = (loss) =>
 
 const ms = (v) =>
   v === null || v === undefined ? "–" : v < 1 ? `${v.toFixed(2)} ms` : v < 10 ? `${v.toFixed(1)} ms` : `${Math.round(v)} ms`;
-const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
 // Nearest-rank percentile.
 const percentile = (a, p) => {
   if (!a.length) return null;
@@ -128,13 +127,31 @@ const describe = (t, i, at) =>
 const HHMM = new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit" });
 const time = (unix) => HHMM.format(unix * 1000);
 
-// Figures over the last `cycles` cycles (default: all 24 hours).
+// Figures over the last `cycles` cycles (default: all 24 hours), in one
+// pass with no copies: a redraw computes them for every target, twice. The
+// 95th percentile needs a sort, so it is a function, called by the detail.
 function summarize(t, cycles = t.rtt.length) {
   const from = Math.max(0, t.rtt.length - cycles);
-  const rtts = t.rtt.slice(from).filter((v) => v !== null);
-  const losses = t.loss.slice(from).filter((v) => v !== null);
-  const jitters = t.jitter.slice(from).filter((v) => v !== null);
-  const up = losses.filter((v) => v < 100).length;
+  let samples = 0, up = 0, lossSum = 0, rttN = 0, rttSum = 0, jitN = 0, jitSum = 0;
+  let min = null, max = null;
+  for (let i = from; i < t.rtt.length; i++) {
+    const loss = t.loss[i], rtt = t.rtt[i], jit = t.jitter[i];
+    if (loss !== null) {
+      samples++;
+      lossSum += loss;
+      if (loss < 100) up++;
+    }
+    if (rtt !== null) {
+      rttN++;
+      rttSum += rtt;
+      if (min === null || rtt < min) min = rtt;
+      if (max === null || rtt > max) max = rtt;
+    }
+    if (jit !== null) {
+      jitN++;
+      jitSum += jit;
+    }
+  }
   let last = null, lastJitter = null;
   for (let i = t.rtt.length - 1; i >= 0; i--) {
     if (t.loss[i] === null) continue;
@@ -143,17 +160,29 @@ function summarize(t, cycles = t.rtt.length) {
     break;
   }
   return {
-    samples: losses.length,
-    uptime: losses.length ? (100 * up) / losses.length : null,
-    avg: mean(rtts),
-    min: rtts.length ? Math.min(...rtts) : null,
-    max: rtts.length ? Math.max(...rtts) : null,
-    p95: percentile(rtts, 95),
-    jitter: mean(jitters),
-    loss: mean(losses),
+    samples,
+    uptime: samples ? (100 * up) / samples : null,
+    avg: rttN ? rttSum / rttN : null,
+    min,
+    max,
+    p95: () => percentile(t.rtt.slice(from).filter((v) => v !== null), 95),
+    jitter: jitN ? jitSum / jitN : null,
+    loss: samples ? lossSum / samples : null,
     last,
     lastJitter,
   };
+}
+
+// The figures of a state's targets, computed once per state: a filter or a
+// new order redraws without computing them again.
+const statsCache = new WeakMap(); // target object -> { day, hour }
+function statsOf(t) {
+  let st = statsCache.get(t);
+  if (!st) {
+    st = { day: summarize(t), hour: summarize(t, 3600 / state.cycle_s) };
+    statsCache.set(t, st);
+  }
+  return st;
 }
 
 // ----- API -------------------------------------------------------------------
@@ -308,8 +337,7 @@ async function call(method, path, body) {
 function render(anim) {
   $("#mode").hidden = !state.read_only;
 
-  const hour = 3600 / state.cycle_s;
-  const stats = new Map(state.targets.map((t) => [t.id, { day: summarize(t), hour: summarize(t, hour) }]));
+  const stats = new Map(state.targets.map((t) => [t.id, statsOf(t)]));
   renderTab(stats);
   // The pills count what the tags and the search leave, like the facets of
   // a shop's search: with a tag selected they show that tag's health.
@@ -325,17 +353,56 @@ function render(anim) {
   const row = active && active.dataset.focus && active.closest("[data-target]");
   const refocus = row && { id: row.dataset.target, key: active.dataset.focus, caret: active.tagName === "INPUT" ? [active.selectionStart, active.selectionEnd] : null };
 
-  // Swapping the list collapses the page for a moment, and the browser clamps
-  // the scroll position to the shorter page: a reader scrolled down would land
-  // at the top. Expanded details are filled in the same task (their chart
-  // needs the attached width) and the position is put back before any paint.
+  // Rows are kept between redraws (`rows`): a new state updates a row in
+  // place (its beats, figures, an open detail), and only a row whose name,
+  // host, tags, status or editor changed is built again. Only the first rows
+  // are drawn, PAGE more whenever the reader scrolls near the end
+  // (`rowLimit`), so a filter redraws a screenful, however long the list.
+  // The scroll position is put back before any paint: a list that was
+  // shorter for a moment would have moved a reader scrolled down.
   const y = window.scrollY;
   const list = $("#targets");
-  const expand = [];
-  list.replaceChildren(...shown.map((t) => renderTarget(t, stats.get(t.id).day, expand, anim)));
-  // The beat strips once the rows are in the page: how many beats fit
-  // depends on the width each one got.
-  for (const t of shown) renderBeats($(`[data-target="${t.id}"] .beats`, list), t, anim);
+  for (const p of list.querySelectorAll(":scope > p")) p.remove();
+  lastShown = shown;
+  const drawn = shown.slice(0, rowLimit);
+  const keep = new Set(drawn.map((t) => t.id));
+  for (const [id, r] of rows)
+    if (!keep.has(id)) {
+      r.node.remove();
+      rows.delete(id);
+    }
+  let prev = null;
+  for (const t of drawn) {
+    const s = stats.get(t.id);
+    const sig = rowSig(t);
+    let r = rows.get(t.id);
+    if (!r || r.sig !== sig) {
+      const node = renderTarget(t, s.day, anim);
+      if (r) r.node.replaceWith(node);
+      r = { node, sig, state: null, gen: -1 };
+      rows.set(t.id, r);
+    }
+    const at = prev ? prev.nextSibling : list.firstChild;
+    if (r.node !== at) list.insertBefore(r.node, at);
+    prev = r.node;
+  }
+  // Fill what a new state (or a new width) changed, now that the rows are
+  // in the page: how many beats fit, and a chart, depend on the width.
+  for (const t of drawn) {
+    const r = rows.get(t.id);
+    if (r.state === state && r.gen === layoutGen) {
+      // Opened or closed by a link (the fragment) rather than a click.
+      const open = view.open.has(t.id);
+      if (open === $(".detail", r.node).hidden) showDetail(r.node, open);
+      continue;
+    }
+    updateRow(r.node, t, stats.get(t.id), r.state === null ? null : anim);
+    r.state = state;
+    r.gen = layoutGen;
+  }
+  const more = $("#more");
+  more.hidden = drawn.length === shown.length;
+  more.textContent = `${drawn.length} of ${shown.length} shown, more as you scroll`;
   if (state.targets.length === 0) list.append(el("p", "empty", "No targets yet."));
   else if (shown.length === 0) {
     const p = el("p", "empty", "No target matches the filter. ");
@@ -345,13 +412,35 @@ function render(anim) {
     p.append(clear);
     list.append(p);
   }
-  for (const show of expand) show();
   renderAddTags();
   placePicker();
   renderLine();
   if (refocus) focusRow(refocus.id, refocus.key, refocus.caret);
   if (window.scrollY !== y) window.scrollTo(0, y);
 }
+
+const PAGE = 20;
+let rowLimit = PAGE;
+let lastShown = [];
+let layoutGen = 0; // bumped by a new width or row density: everything refits
+const rows = new Map(); // target id -> { node, sig, state, gen }
+
+// What a row is built from; the rest it updates in place.
+const rowSig = (t) =>
+  JSON.stringify([
+    t.name, t.host, t.tags, statusOf(t), t.paused,
+    renaming !== null && renaming.id === t.id ? renaming.note : null, // the editor, and why it refused
+    editing !== null && editing.id === t.id,
+    rowNote !== null && rowNote.id === t.id ? rowNote.text : null,
+    t.tags.filter((tag) => view.tags.has(tag)),
+  ]);
+
+// More rows when the reader nears the end of the drawn ones.
+new IntersectionObserver((entries) => {
+  if (!state || !entries.some((e) => e.isIntersecting) || rowLimit >= lastShown.length) return;
+  rowLimit += PAGE;
+  render();
+}, { rootMargin: "800px 0px" }).observe($("#more"));
 
 // ----- live: the cycle being probed ----------------------------------------------
 
@@ -402,7 +491,7 @@ function updateLive() {
     if (showsLive(t) !== !!b) renderBeats(beats, t, null);
     else if (b) fillLive(b, t, true);
     const lat = $(".latency", row);
-    const text = ms(latencyOf(t, { last: summarize(t, 1).last }));
+    const text = ms(latencyOf(t, statsOf(t).day));
     if (lat.textContent !== text) {
       lat.textContent = text;
       lat.classList.remove("fresh");
@@ -604,6 +693,7 @@ function renderFeed(shown) {
 function showTarget(id) {
   view.open.add(id);
   saveView();
+  rowLimit = Math.max(rowLimit, lastShown.findIndex((t) => t.id === id) + 1);
   render();
   $(`[data-target="${id}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
 }
@@ -727,9 +817,11 @@ function sortTargets(list, stats) {
   return list.sort((a, b) => dir * cmp(a, b) || (view.sort === "name" ? dir : 1) * byName(a, b));
 }
 
+// A new filter or order draws the first rows again, not as many as were.
 function setView(change) {
   change();
   saveView();
+  rowLimit = PAGE;
   if (state) render();
 }
 
@@ -781,11 +873,13 @@ function renderToolbar(count) {
   }
 }
 
-// expand collects the detail renderers of expanded targets; render() calls
-// them once the row is in the page.
-function renderTarget(t, s, expand, anim) {
+// A row, built; `updateRow` fills it. Its handlers read the row's current
+// target (`node.t`, `node.s`), which a new state replaces in place.
+function renderTarget(t, s, anim) {
   const node = $("#row").content.firstElementChild.cloneNode(true);
   node.dataset.target = t.id;
+  node.t = t;
+  node.s = s;
   const [label, color] = STATUS[statusOf(t)];
   // A new status: the row flashes in its colour.
   if (anim && anim.flash.has(t.id)) {
@@ -804,34 +898,42 @@ function renderTarget(t, s, expand, anim) {
   } else {
     $(".name", node).textContent = t.name;
     $(".host", node).textContent = t.host;
-    $(".edit-target", node).addEventListener("click", () => openRename(t));
+    $(".edit-target", node).addEventListener("click", () => openRename(node.t));
     renderTagLine($(".tagline", node), t);
     if (rowNote && rowNote.id === t.id) who.append(el("span", "row-note", rowNote.text));
   }
-  $(".uptime", node).textContent = s.uptime === null ? "–" : `${s.uptime.toFixed(s.uptime === 100 ? 0 : 2)} %`;
-  $(".latency", node).textContent = ms(latencyOf(t, s));
 
-  const expandButton = $(".expand", node);
-  expandButton.setAttribute("aria-label", `${t.name}: chart, figures and actions`);
-  const detail = $(".detail", node);
-  const toggle = (show) => {
-    detail.hidden = !show;
-    expandButton.setAttribute("aria-expanded", String(show));
-    if (show) renderDetail(detail, t, s);
-    else stopTrace(t.id);
-  };
   // A click anywhere in the head expands the row, except on its editors.
   // They stop the click themselves: by the time it would get here, they may
   // have redrawn the row, and the clicked element is no longer in it.
   for (const e of node.querySelectorAll(".edit-btn")) e.addEventListener("click", (ev) => ev.stopPropagation());
   head.addEventListener("click", () => {
-    if (view.open.has(t.id)) view.open.delete(t.id);
-    else view.open.add(t.id);
+    const id = node.t.id;
+    if (view.open.has(id)) view.open.delete(id);
+    else view.open.add(id);
     saveView();
-    toggle(view.open.has(t.id));
+    showDetail(node, view.open.has(id));
   });
-  if (view.open.has(t.id)) expand.push(() => toggle(true));
   return node;
+}
+
+// What a new state changes in a row: figures, beats, an open detail.
+function updateRow(node, t, s, anim) {
+  node.t = t;
+  node.s = s.day;
+  $(".uptime", node).textContent = s.day.uptime === null ? "–" : `${s.day.uptime.toFixed(s.day.uptime === 100 ? 0 : 2)} %`;
+  $(".latency", node).textContent = ms(latencyOf(t, s.day));
+  $(".expand", node).setAttribute("aria-label", `${t.name}: chart, figures and actions`);
+  renderBeats($(".beats", node), t, anim);
+  showDetail(node, view.open.has(t.id));
+}
+
+function showDetail(node, show) {
+  const detail = $(".detail", node);
+  detail.hidden = !show;
+  $(".expand", node).setAttribute("aria-expanded", String(show));
+  if (show) renderDetail(detail, node.t, node.s);
+  else stopTrace(node.t.id);
 }
 
 // The last cycles, one beat each; the newest, while it is being probed, is
@@ -841,7 +943,7 @@ function renderBeats(box, t, anim) {
   // As many recent cycles as fit (the strip is in the page by now); refit
   // on resize via render().
   const width = box.clientWidth || Math.min(window.innerWidth - 80, 540);
-  const n = Math.max(10, Math.min(90, Math.floor(width / BEAT_PX)));
+  const n = Math.max(10, Math.min(90, Math.floor(width / (document.body.classList.contains("compact") ? BEAT_PX - 1 : BEAT_PX))));
   const last = t.loss.length - 1;
   box.replaceChildren();
   for (let i = t.loss.length - n; i < t.loss.length; i++) {
@@ -871,7 +973,7 @@ function renderDetail(detail, t, s) {
   };
   stat("current", s.lastJitter === null ? ms(s.last) : `${ms(s.last)} ± ${ms(s.lastJitter)}`);
   stat("average (24 h)", ms(s.avg));
-  stat("95th percentile (24 h)", ms(s.p95));
+  stat("95th percentile (24 h)", ms(s.p95()));
   stat("jitter (24 h)", ms(s.jitter));
   stat("best / worst", `${ms(s.min)} / ${ms(s.max)}`);
   stat("packet loss (24 h)", s.loss === null ? "–" : `${s.loss.toFixed(2)} %`);
@@ -1651,6 +1753,7 @@ $("#order").addEventListener("click", () => setView(() => (view.rev = !view.rev)
 window.addEventListener("hashchange", () => {
   Object.assign(view, parseView());
   syncControls();
+  rowLimit = PAGE;
   if (state) render();
 });
 
@@ -1660,6 +1763,7 @@ window.addEventListener("resize", () => {
   resizeTimer = setTimeout(() => {
     if (!state || window.innerWidth === renderedWidth) return;
     renderedWidth = window.innerWidth;
+    layoutGen++;
     render();
   }, 150);
 });
@@ -1681,6 +1785,22 @@ try {
 } catch {}
 setMenu(menuOpen);
 $("#menu").addEventListener("click", () => setMenu($("#menu-body").hidden));
+// Compact rows: this browser remembers the choice.
+const COMPACT_KEY = "zpinger.compact";
+function setCompact(on) {
+  document.body.classList.toggle("compact", on);
+  $("#compact").setAttribute("aria-pressed", String(on));
+  try {
+    if (on) localStorage.setItem(COMPACT_KEY, "1");
+    else localStorage.removeItem(COMPACT_KEY);
+  } catch {}
+  layoutGen++;
+  if (state) render();
+}
+try {
+  if (localStorage.getItem(COMPACT_KEY) === "1") setCompact(true);
+} catch {}
+$("#compact").addEventListener("click", () => setCompact(!document.body.classList.contains("compact")));
 $("#add-open").addEventListener("click", () => {
   setMenu(true);
   $("#add").name.focus();
