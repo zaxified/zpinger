@@ -159,7 +159,7 @@ async def main():
                     def win(k):
                         loss = [v for v in t["loss"][-k:] if v is not None]
                         jit = [v for v in t["jitter"][-k:] if v is not None]
-                        return (sum(loss) / len(loss) if loss else 0), (statistics.median(jit) if jit else 0)
+                        return (sum(loss) / len(loss) if loss else 0), (statistics.median_high(jit) if jit else 0)
                     h, d = win(60), win(1440)
                     status = "acked" if t["status"] == "down" and t["acked"] else t["status"]
                     tier = {"down": 0, "degraded": 1, "acked": 4, "pending": 6, "paused": 7}.get(status)

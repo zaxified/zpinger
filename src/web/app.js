@@ -133,18 +133,10 @@ const time = (unix) => HHMM.format(unix * 1000);
 // Figures over the last `cycles` cycles (default: all 24 hours), in one
 // pass with no copies: a redraw computes them for every target, twice. The
 // 95th percentile needs a sort, so it is a function, called by the detail.
-// The median of a typed array, sorted in place.
-function medianOf(a) {
-  a.sort();
-  const h = a.length >> 1;
-  return a.length % 2 ? a[h] : (a[h - 1] + a[h]) / 2;
-}
-
 function summarize(t, cycles = t.rtt.length) {
   const from = Math.max(0, t.rtt.length - cycles);
-  let samples = 0, up = 0, lossSum = 0, rttN = 0, rttSum = 0, jitN = 0, jitSum = 0;
+  let samples = 0, up = 0, lossSum = 0, rttN = 0, rttSum = 0, jitN = 0, jitSum = 0, jitHigh = 0;
   let min = null, max = null;
-  const jits = new Float64Array(t.rtt.length - from); // for the median
   for (let i = from; i < t.rtt.length; i++) {
     const loss = t.loss[i], rtt = t.rtt[i], jit = t.jitter[i];
     if (loss !== null) {
@@ -159,8 +151,9 @@ function summarize(t, cycles = t.rtt.length) {
       if (max === null || rtt > max) max = rtt;
     }
     if (jit !== null) {
-      jits[jitN++] = jit;
+      jitN++;
       jitSum += jit;
+      if (jit >= JITTER_WARN_MS) jitHigh++;
     }
   }
   let last = null, lastJitter = null;
@@ -178,9 +171,11 @@ function summarize(t, cycles = t.rtt.length) {
     max,
     p95: () => percentile(t.rtt.slice(from).filter((v) => v !== null), 95),
     jitter: jitN ? jitSum / jitN : null,
-    // What the problem rule looks at: a few spikes (a busy host, one bad
-    // minute) move the mean, not the median; a jittery link moves both.
-    jitterMedian: jitN ? medianOf(jits.subarray(0, jitN)) : null,
+    // What the problem rule looks at: whether the (upper) median jitter
+    // reached JITTER_WARN_MS, i.e. at least half the cycles did; counted in
+    // this pass, no sort. A few spikes (a busy host, one bad minute) move
+    // the mean, not the median; a jittery link moves both.
+    jitterHigh: jitN > 0 && jitHigh >= Math.ceil(jitN / 2),
     loss: samples ? lossSum / samples : null,
     last,
     lastJitter,
@@ -876,7 +871,7 @@ function matches(t) {
 // of every target over the threshold).
 const LOSS_WARN_PCT = 1;
 const JITTER_WARN_MS = 10;
-const troubled = (s) => s.loss >= LOSS_WARN_PCT || s.jitterMedian >= JITTER_WARN_MS;
+const troubled = (s) => s.loss >= LOSS_WARN_PCT || s.jitterHigh;
 
 // Problems first, the most urgent on top: DOWN, LOSS now, a problem in the
 // last hour, one in the last 24 hours, an acknowledged outage (known, so
