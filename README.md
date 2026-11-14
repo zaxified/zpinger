@@ -13,7 +13,7 @@ shipped as a Debian package; no root needed.
 
 ![zpinger: eight hosts with status, tags, recent cycles and uptime; one row expanded to its 24-hour latency chart and a live trace of the route, hop by hop](doc/screenshot.png)
 
-<sub>The read-only demo (`--demo`, sample data): one target down, one row expanded with a live trace. The route is made up from documentation addresses.</sub>
+<sub>The read-only demo (`--demo`, older half sample data): one target down, the bar folded, one row expanded with a live trace. The route is made up from documentation addresses.</sub>
 
 ## Our own code, all the way down
 
