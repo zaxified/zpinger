@@ -82,8 +82,9 @@ and these entries come from zig-fping's CHANGELOG.md.
 - **Light on the wire and in the browser, for large lists.** The page asks
   for the state only as a delta after the first load (`/api/state?since=`:
   the cycles since its own, 1.1 KB instead of 208 KB compressed per cycle at
-  64 targets), and for only the probes it has not seen (`/api/live?cycle=
-  &from=`). Times are formatted with one shared formatter and the beats'
+  64 targets; a delta reaches back at most 60 cycles, an older `since` gets
+  the whole, shared state), and for only the probes it has not seen
+  (`/api/live?cycle=&from=`). Times are formatted with one shared formatter and the beats'
   tooltips written on hover: a redraw at 64 targets takes 91 ms (was 468).
   The gap between two packets shrinks below 20 ms when a minute would not
   hold every probe otherwise (above about 580 targets). Measured up to 1000

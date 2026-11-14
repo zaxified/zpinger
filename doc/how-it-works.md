@@ -131,9 +131,10 @@ starts, but only to a listed target and within the server's bounds
 - **One serialization per change.** The state JSON is built once per cycle
   (or target change) and served to every viewer from a cache. The page polls
   only the small live view (`/api/live`, the running cycle's probes) every
-  2 s, and fetches the state when that says it changed, with
-  `If-None-Match` (a body-less `304` when nothing did); a background tab does
-  not poll at all. Measured with 64 targets (a 1.1 MB
+  2 s, and fetches the state when that says it changed: after the first
+  load only a delta, the cycles since its own (`?since=`, shared by the
+  viewers asking from the same cycle; [api.md](api.md#get-apistate)); a
+  background tab does not poll at all. Measured with 64 targets (a 1.1 MB
   state): 200 concurrent clients fetching it for 10 s, 10 660 full
   responses, 99 threads, 34 MB RSS; idle 11 MB.
 - **Bounded connections.** At most 256 at once and 16 from one client

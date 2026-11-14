@@ -125,6 +125,14 @@ pub const StateTag = struct {
 pub const default_max_targets = 200;
 /// What `ZPINGER_MAX_TARGETS` may raise it to (untested above the default).
 pub const max_targets_ceiling = 10_000;
+/// The most cycles a state delta (`Monitor.state` with `since`) holds; an
+/// older `since` gets the whole state. Only one delta is cached, so viewers
+/// asking from different cycles each get one built for them alone, held while
+/// they read it: a delta of the whole day was the whole state again, and two
+/// clients alternating `since` with slow reads held one 3.5 MB copy each (at
+/// 200 targets; 256 connections, over the service's MemoryMax). An hour at
+/// the default cycle is 4 % of that; the page asks from its last cycle.
+pub const max_delta_cycles = 60;
 /// Tags per target, and bytes per tag.
 pub const max_tags = 8;
 pub const max_tag_len = 32;
@@ -886,15 +894,15 @@ pub const Monitor = struct {
     /// With `since` (the `end` of a state the viewer has) the series hold
     /// only the cycles from `since` to now, `since` included (it may have been
     /// recorded since): a page that has the state needs a few bytes a cycle
-    /// per target, not the whole day again. A `since` outside the series, or
-    /// not on a cycle boundary, gets the whole state; the answer's `since`
-    /// says which it is.
+    /// per target, not the whole day again. A `since` older than
+    /// `max_delta_cycles`, or not on a cycle boundary, gets the whole state;
+    /// the answer's `since` says which it is.
     pub fn state(m: *Monitor, since: ?i64) error{OutOfMemory}!*Snapshot {
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
         const tag = m.stateTagLocked();
         const delta: ?i64 = if (since) |v|
-            (if (v <= tag.end and v > tag.end - history_len * m.cycle_s and @mod(tag.end - v, m.cycle_s) == 0) v else null)
+            (if (v <= tag.end and v > tag.end - max_delta_cycles * m.cycle_s and @mod(tag.end - v, m.cycle_s) == 0) v else null)
         else
             null;
         const cache = if (delta != null) &m.delta else &m.snapshot;
@@ -1499,13 +1507,19 @@ test "a delta: the series from since on, shared, and the whole state when since 
     const again = try m.state(end - c);
     defer again.release();
     try testing.expectEqual(d, again);
-    // Not on a cycle boundary, older than the series, from the future: whole.
-    for ([_]i64{ end - @divExact(c, 2), end - history_len * c, end + c }) |off| {
+    // Not on a cycle boundary, older than a delta reaches (each viewer's own
+    // copy, see `max_delta_cycles`) or than the series, from the future: whole.
+    for ([_]i64{ end - @divExact(c, 2), end - max_delta_cycles * c, end - history_len * c, end + c }) |off| {
         const full = try m.state(off);
         defer full.release();
         try testing.expectEqual(@as(?i64, null), full.since);
         try testing.expect(std.mem.find(u8, full.json, "\"since\"") == null);
     }
+    // The oldest a delta reaches: `max_delta_cycles` entries per series.
+    const oldest = try m.state(end - (max_delta_cycles - 1) * c);
+    defer oldest.release();
+    try testing.expectEqual(@as(?i64, end - (max_delta_cycles - 1) * c), oldest.since);
+    try testing.expectEqual(@as(usize, max_delta_cycles - 1), std.mem.count(u8, std.mem.sliceTo(oldest.json[std.mem.find(u8, oldest.json, "\"loss\":[").?..], ']'), ","));
 }
 
 test "health: cycles must keep finishing and probing must work" {

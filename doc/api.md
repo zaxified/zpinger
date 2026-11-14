@@ -44,8 +44,10 @@ changes. A client that accepts gzip gets it compressed (`"…-gzip"` ETag).
 same answer, but the series hold only the cycles from `END` on (`END`
 included: it may have been recorded since), and `since` says so. Put them
 after your own series without its newest entry, shifted by `(end - END) /
-cycle_s`. A `since` that is not a cycle start within the last 24 hours gets
-the whole state (no `since` in the answer). The page asks for a delta every
+cycle_s`. A `since` that is not a cycle start within the last 60 cycles (an
+hour at the default cycle) gets the whole state (no `since` in the answer):
+the whole state is built once and shared by every viewer, a delta only by
+the viewers asking from the same cycle. The page asks for a delta every
 time the live view says the state changed: a few hundred bytes per target
 rather than the whole day (3.5 MB, 650 KB compressed, at 200 targets).
 Fetch the whole state again when `demo_from` or `demo_fills` changed (a demo
