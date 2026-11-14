@@ -4,7 +4,7 @@ This application started in the zig-fping repository as
 `example-apps/fping-watch`; its history was carried over (`git filter-repo`),
 and these entries come from zig-fping's CHANGELOG.md.
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-11-14)
 
 - **A problem is judged by the median jitter**, not the mean: 1 % packet
   loss on average or a median jitter of 10 ms, over the hour or the day. A
