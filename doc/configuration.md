@@ -20,7 +20,7 @@ The history is kept in `/var/lib/zpinger/history.json`.
 |---|---|---|
 | `--listen ADDR:PORT` | `127.0.0.1:8080` | web server address |
 | `--targets FILE` | `targets.json` | target list; rewritten on every change; a writable instance without it starts empty |
-| `--history FILE` | (memory only) | the 24-hour history, saved after every cycle; a corrupt one is moved to `FILE.bad`, one the service cannot read stops it from starting, one from another `--cycle` is ignored and overwritten |
+| `--history FILE` | (memory only) | the 24-hour history, saved after every cycle (every few cycles when it is big: about a megabyte a minute at most, so a crash loses up to 15 cycles); a corrupt one is moved to `FILE.bad`, one the service cannot read stops it from starting, one from another `--cycle` is ignored and overwritten |
 | `--read-only` | off | refuse every change |
 | `--demo` | off | `--read-only`, and history older than the newer half (12 hours at `--cycle 60`) is sample data ([deploying.md](deploying.md#sample-data-for-a-demo)) |
 | `--allow-host NAME` | | a writable instance also answers to this host name (repeatable; [below](#a-writable-instance-and-host-names)) |
