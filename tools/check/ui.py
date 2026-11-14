@@ -6,7 +6,7 @@
 # .json) and a writable one whose list is exactly
 #   {"targets":[{"name":"x","host":"192.0.2.1","tags":["old"]}]}
 #   ui.py DEMO_URL RW_URL SHOTDIR      `ok`/`FAIL` lines, exit 1 on any FAIL
-import asyncio, base64, json, os, subprocess, sys, tempfile, time, urllib.request
+import asyncio, base64, json, os, subprocess, sys, tempfile, time, unicodedata, urllib.request
 import websockets
 
 DEMO, RW, SHOTS = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -177,7 +177,9 @@ async def main():
             await js("$('#order').click()")
             await js("const s = $('#sort'); s.value = 'name'; s.dispatchEvent(new Event('change'))")
             order = await js(names)
-            check(order == sorted(order, key=str.lower), "sort name")
+            # The page sorts as people read (localeCompare): São before Singapore.
+            plain = lambda n: unicodedata.normalize("NFKD", n).encode("ascii", "ignore").decode().lower()
+            check(order == sorted(order, key=plain), f"sort name: {order}")
             await js("$('#order').click()")
             check(await js(names) == order[::-1], "name reversed")
 
@@ -185,7 +187,7 @@ async def main():
             await go(DEMO + "/#tags=google&q=ipv6&sort=name&rev=1")
             check(await js(names) == sorted(expect(("google",), "ipv6"), key=str.lower, reverse=True) == ["Google DNS (IPv6)"], "view from the fragment")
             check(await js("$('#find').value") == "ipv6" and await js("$('#sort').value") == "name", "controls from the fragment")
-            await go(DEMO + "/#3")
+            await go(DEMO + "/#3")  # far down the list in the status order: drawn all the same
             check(await js("[...document.querySelectorAll('.detail')].filter(d => !d.hidden).length") == 1, "legacy #3 opens a target")
             await js("document.querySelector('.head').click()")  # close the first (status order) row? only if it is 3
             await go(DEMO + "/")

@@ -368,6 +368,8 @@ function render(anim) {
   fitWhoColumn(list);
   for (const p of list.querySelectorAll(":scope > p")) p.remove();
   lastShown = shown;
+  // A row opened by a link (#open=ID) is drawn, however far down it is.
+  for (const id of view.open) rowLimit = Math.max(rowLimit, shown.findIndex((t) => t.id === id) + 1);
   const drawn = shown.slice(0, rowLimit);
   const keep = new Set(drawn.map((t) => t.id));
   for (const [id, r] of rows)

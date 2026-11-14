@@ -11,9 +11,9 @@ hours, plus a live trace of the route to any of them. One static binary,
 shipped as a Debian package; no root needed.
 **[Try the live demo](https://zpinger.dalimilzak.cz/).**
 
-![zpinger: eight hosts with status, tags, recent cycles and uptime; one row expanded to its 24-hour latency chart and a live trace of the route, hop by hop](doc/screenshot.png)
+![zpinger: thirty hosts around the world in compact rows with status, recent cycles, uptime and latency; one row expanded to its 24-hour latency chart and a live trace of the route, hop by hop](doc/screenshot.png)
 
-<sub>The read-only demo (`--demo`, older half sample data): one target down, the bar folded, one row expanded with a live trace. The route is made up from documentation addresses.</sub>
+<sub>The read-only demo (`--demo`, older half sample data) in compact rows: one target down, one acknowledged, the bar folded, one row expanded with a live trace. The route is made up from documentation addresses.</sub>
 
 ## Our own code, all the way down
 

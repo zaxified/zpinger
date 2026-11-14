@@ -56,7 +56,8 @@ and these entries come from zig-fping's CHANGELOG.md.
   changes a row's beats, figures and open detail without building the list
   again; only a row whose name, host, tags or status changed is rebuilt.
   Only the first 20 rows matching the filter are drawn, 20 more as the
-  reader scrolls near the end, and each target's figures are computed once
+  reader scrolls near the end (a link that opens a row further down,
+  `#open=ID`, draws it), and each target's figures are computed once
   per state, in one pass: at 200 targets a keystroke in the search takes
   6 ms, a new cycle 22 ms (measured in headless Chrome).
 - **Fixed: a target's tags leaked when memory ran out while copying them**
