@@ -29,10 +29,22 @@ and these entries come from zig-fping's CHANGELOG.md.
   fills with the cycle's probes, green answered, red lost.
 - **Events.** The outages and losses of the last 24 hours, read from the
   history: under the bar for all targets shown, or in a target's detail for
-  that one; both hidden until asked for. A run of lossy cycles is one event
-  (up to 5 clean cycles inside it do not end it), a DOWN one when some of
-  its cycles lost every probe; a single cycle that lost one probe is left
-  out.
+  that one, the newest on top; both hidden until asked for. A run of lossy
+  cycles is one event (up to 5 clean cycles inside it do not end it), a DOWN
+  one when some of its cycles lost every probe; a single cycle that lost one
+  probe is left out.
+- **Light on the wire and in the browser, for large lists.** The page asks
+  for the state only as a delta after the first load (`/api/state?since=`:
+  the cycles since its own, 1.1 KB instead of 208 KB compressed per cycle at
+  64 targets), and for only the probes it has not seen (`/api/live?cycle=
+  &from=`). Times are formatted with one shared formatter and the beats'
+  tooltips written on hover: a redraw at 64 targets takes 91 ms (was 468).
+  The gap between two packets shrinks below 20 ms when a minute would not
+  hold every probe otherwise (above about 580 targets). Measured up to 1000
+  targets with a test build (the limit stays 64).
+- **The add form moved into the bar** (☰, or `+` to go straight to it); the
+  footer links to zpinger. The beat strips are fitted to their real width
+  (a strip drawn before its row was in the page had about ten beats more).
 - **`--demo` keeps 12 hours of real data** (was 1 hour; half the history, so
   12 hours at the default `--cycle 60`); only the older half is sample data.
   The real data includes what the history file kept from before a restart.

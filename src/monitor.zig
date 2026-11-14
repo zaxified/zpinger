@@ -153,8 +153,11 @@ pub const Monitor = struct {
     /// Bumped on every change the web page would show; with the cycle start
     /// it identifies one `stateJson` result (see `StateTag`).
     version: u64 = 0,
-    /// The last `state` result, shared by every viewer (holds one reference).
+    /// The last `state` result, shared by every viewer (holds one reference),
+    /// and the last delta (`state` with `since`): the viewers polling since
+    /// the same cycle share it the same way.
     snapshot: ?*Snapshot = null,
+    delta: ?*Snapshot = null,
     /// Files serialized under `mutex` but not written yet: `flushSaves`
     /// writes them after `mutex` is released, so a slow disk (fsync) never
     /// holds up the page or the probing loop.
@@ -195,6 +198,7 @@ pub const Monitor = struct {
         for (m.targets.items) |t| m.freeTarget(t);
         m.targets.deinit(m.gpa);
         if (m.snapshot) |snap| snap.release();
+        if (m.delta) |snap| snap.release();
         if (m.pending_config) |c| m.gpa.free(c);
         if (m.pending_history) |h| m.gpa.free(h);
     }
@@ -495,11 +499,17 @@ pub const Monitor = struct {
         m.live.appendAssumeCapacity(.{ .id = id, .at_ms = @intCast(at_ms), .rtt_us = rtt_us });
     }
 
+    /// What a poll of the live view already has: the probes before `from`
+    /// of `cycle` (null: nothing).
+    pub const LiveSince = struct { cycle: ?u64 = null, from: u64 = 0 };
+
     /// GET /api/live: the cycle being probed, the targets it probes and its
-    /// probes so far (see doc/api.md). `version` is the state's: a page whose
-    /// state has another version, or an older `end` than `cycle`, loads the
-    /// state again.
-    pub fn writeLive(m: *Monitor, w: *Io.Writer) Io.Writer.Error!void {
+    /// probes so far (see doc/api.md); with `since` naming this cycle, only
+    /// the probes after `since.from` (`from` in the answer says where they
+    /// start, `count` how many there are in all). `version` is the state's:
+    /// a page whose state has another version, or an older `end` than
+    /// `cycle`, loads the state again.
+    pub fn writeLive(m: *Monitor, w: *Io.Writer, since: LiveSince) Io.Writer.Error!void {
         const now_ms = Io.Clock.real.now(m.io).toMilliseconds();
         const version = blk: {
             m.mutex.lockUncancelable(m.io);
@@ -510,8 +520,10 @@ pub const Monitor = struct {
         defer m.live_mutex.unlock(m.io);
         try w.print("{{\"now\":{d},\"cycle\":{d},\"cycle_s\":{d},\"version\":{d},\"targets\":[", .{ now_ms, m.live_cycle, m.cycle_s, version });
         for (m.live_ids.items, 0..) |id, i| try w.print("{s}{d}", .{ if (i == 0) "" else ",", id });
-        try w.writeAll("],\"probes\":[");
-        for (m.live.items, 0..) |p, i| {
+        const same = since.cycle != null and m.live_cycle >= 0 and since.cycle.? == @as(u64, @intCast(m.live_cycle)) and since.from <= m.live.items.len;
+        const from: usize = if (same) @intCast(since.from) else 0;
+        try w.print("],\"count\":{d},\"from\":{d},\"probes\":[", .{ m.live.items.len, from });
+        for (m.live.items[from..], 0..) |p, i| {
             try w.print("{s}[{d},{d},", .{ if (i == 0) "" else ",", p.id, p.at_ms });
             if (p.rtt_us) |v| try writeMs(w, v) else try w.writeAll("null");
             try w.writeByte(']');
@@ -810,25 +822,37 @@ pub const Monitor = struct {
     /// viewers costs one serialization per change, and slow readers hold at
     /// most the few snapshots made while they read (not one copy each: 256
     /// slow readers of a 64-target state were 256 x 1.4 MB).
-    pub fn state(m: *Monitor) error{OutOfMemory}!*Snapshot {
+    ///
+    /// With `since` (the `end` of a state the viewer has) the series hold
+    /// only the cycles from `since` to now, `since` included (it may have been
+    /// recorded since): a page that has the state needs a few bytes a cycle
+    /// per target, not the whole day again. A `since` outside the series, or
+    /// not on a cycle boundary, gets the whole state; the answer's `since`
+    /// says which it is.
+    pub fn state(m: *Monitor, since: ?i64) error{OutOfMemory}!*Snapshot {
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
         const tag = m.stateTagLocked();
-        const current = m.snapshot;
-        if (current == null or !std.meta.eql(current.?.tag, tag)) {
+        const delta: ?i64 = if (since) |v|
+            (if (v <= tag.end and v > tag.end - history_len * m.cycle_s and @mod(tag.end - v, m.cycle_s) == 0) v else null)
+        else
+            null;
+        const cache = if (delta != null) &m.delta else &m.snapshot;
+        const current = cache.*;
+        if (current == null or !std.meta.eql(current.?.tag, tag) or current.?.since != delta) {
             var aw: Io.Writer.Allocating = .init(m.gpa);
             defer aw.deinit();
-            m.writeStateLocked(&aw.writer, tag.end) catch return error.OutOfMemory;
+            m.writeStateLocked(&aw.writer, tag.end, delta) catch return error.OutOfMemory;
             const snap = try m.gpa.create(Snapshot);
-            snap.* = .{ .gpa = m.gpa, .tag = tag, .json = &.{} };
+            snap.* = .{ .gpa = m.gpa, .tag = tag, .since = delta, .json = &.{} };
             snap.json = aw.toOwnedSlice() catch {
                 m.gpa.destroy(snap);
                 return error.OutOfMemory;
             };
             if (current) |old| old.release();
-            m.snapshot = snap;
+            cache.* = snap;
         }
-        const snap = m.snapshot.?;
+        const snap = cache.*.?;
         _ = snap.refs.fetchAdd(1, .monotonic);
         return snap;
     }
@@ -838,6 +862,8 @@ pub const Monitor = struct {
         gpa: std.mem.Allocator,
         refs: std.atomic.Value(u32) = .init(1),
         tag: StateTag,
+        /// A delta from this cycle on (see `state`); null = the whole state.
+        since: ?i64 = null,
         json: []u8,
         /// `json` gzip-compressed, made by the first `gzipped` call.
         gz: ?[]u8 = null,
@@ -866,13 +892,16 @@ pub const Monitor = struct {
     };
 
     /// Per target, `rtt` (ms), `jitter` (ms) and `loss` (%) hold one entry per cycle of the
-    /// last 24 hours, oldest first, the newest at cycle start `newest`;
-    /// `null` where there is no sample.
-    fn writeStateLocked(m: *Monitor, w: *Io.Writer, newest: i64) Io.Writer.Error!void {
+    /// last 24 hours (or from `since` on), oldest first, the newest at cycle
+    /// start `newest`; `null` where there is no sample.
+    fn writeStateLocked(m: *Monitor, w: *Io.Writer, newest: i64, since: ?i64) Io.Writer.Error!void {
         try w.print(
-            "{{\"read_only\":{},\"version\":{d},\"demo_from\":{d},\"cycle_s\":{d},\"probes\":{d},\"ack_clear_after\":{d},\"end\":{d},\"targets\":[",
+            "{{\"read_only\":{},\"version\":{d},\"demo_from\":{d},\"cycle_s\":{d},\"probes\":{d},\"ack_clear_after\":{d},\"end\":{d},",
             .{ m.read_only, m.version, m.demo_from, m.cycle_s, probes_per_cycle, ack_clear_after, newest },
         );
+        if (since) |v| try w.print("\"since\":{d},", .{v});
+        try w.writeAll("\"targets\":[");
+        const count: i64 = if (since) |v| @divExact(newest - v, m.cycle_s) + 1 else history_len;
         for (m.targets.items, 0..) |t, i| {
             try w.print(
                 "{s}{{\"id\":{d},\"name\":{f},\"host\":{f},\"status\":\"{t}\",\"paused\":{},\"acked\":{},\"ok_streak\":{d},\"error\":{f},\"sample\":{}",
@@ -888,22 +917,23 @@ pub const Monitor = struct {
             if (t.addr) |a| try w.print(",\"address\":\"{f}\"", .{a.toIp()}) else try w.writeAll(",\"address\":null");
             try w.print(",\"dns\":\"{t}\"", .{t.dns});
             try w.writeAll(",\"rtt\":[");
-            try m.writeSeries(w, t, newest, .rtt);
+            try m.writeSeries(w, t, newest, count, .rtt);
             try w.writeAll("],\"jitter\":[");
-            try m.writeSeries(w, t, newest, .jitter);
+            try m.writeSeries(w, t, newest, count, .jitter);
             try w.writeAll("],\"loss\":[");
-            try m.writeSeries(w, t, newest, .loss);
+            try m.writeSeries(w, t, newest, count, .loss);
             try w.writeAll("]}");
         }
         try w.writeAll("]}");
     }
 
-    fn writeSeries(m: *Monitor, w: *Io.Writer, t: *const Target, newest: i64, comptime what: enum { rtt, jitter, loss }) Io.Writer.Error!void {
-        var k: i64 = history_len - 1;
+    /// The last `count` cycles of one series, up to `newest`.
+    fn writeSeries(m: *Monitor, w: *Io.Writer, t: *const Target, newest: i64, count: i64, comptime what: enum { rtt, jitter, loss }) Io.Writer.Error!void {
+        var k: i64 = count - 1;
         while (k >= 0) : (k -= 1) {
             const at = newest - k * m.cycle_s;
             const s = t.history[m.slot(at)];
-            if (k != history_len - 1) try w.writeByte(',');
+            if (k != count - 1) try w.writeByte(',');
             if (s.t != at or s.sent == 0) {
                 try w.writeAll("null");
             } else switch (what) {
@@ -1199,18 +1229,22 @@ const Job = struct {
 /// How long a probe waits for its reply.
 const probe_timeout_ns = std.time.ns_per_s;
 
-/// The probe schedule for a window of `window_ns`: every target gets
-/// `probes_per_cycle` probes a fifth of the window apart, starting at a
-/// random point of the first fifth, so the probes of all targets lie spread
-/// over the whole window in no fixed order (no burst at the start of the
-/// cycle, and a short outage anywhere in it is seen). At least 20 ms between
-/// any two packets, as before.
-fn spreadConfig(window_ns: u64) icmp.Config {
+/// The probe schedule for `targets` over a window of `window_ns`: every
+/// target gets `probes_per_cycle` probes a fifth of the window apart,
+/// starting at a random point of the first fifth, so the probes of all
+/// targets lie spread over the whole window in no fixed order (no burst at
+/// the start of the cycle, and a short outage anywhere in it is seen).
+/// Between any two packets at least 20 ms, or half the average gap when that
+/// is less: a fixed 20 ms (50 a second) fit about 580 targets in a minute,
+/// and with more the round ran past its cycle (measured at 1000: 4057 of
+/// 5000 probes in the minute, every other cycle lost).
+fn spreadConfig(window_ns: u64, targets: usize) icmp.Config {
     const period = @max(window_ns / probes_per_cycle, 100 * std.time.ns_per_ms);
+    const probes: u64 = @max(1, targets * probes_per_cycle);
     return .{
         .mode = .count,
         .count = probes_per_cycle,
-        .interval_ns = 20 * std.time.ns_per_ms,
+        .interval_ns = std.math.clamp(window_ns / probes / 2, std.time.ns_per_ms, 20 * std.time.ns_per_ms),
         .perhost_interval_ns = period,
         .timeout_ns = probe_timeout_ns,
         .jitter_ns = period,
@@ -1221,7 +1255,11 @@ fn spreadConfig(window_ns: u64) icmp.Config {
 /// `window_ns` (see `spreadConfig`). Each answer or timeout also goes to the
 /// monitor's live view of cycle `t` as it comes.
 fn probe(m: *Monitor, jobs: []Job, t: i64, window_ns: u64) !void {
-    var pinger = try icmp.Pinger.init(m.gpa, spreadConfig(window_ns));
+    var n_addr: usize = 0;
+    for (jobs) |job| if (job.addr != null) {
+        n_addr += 1;
+    };
+    var pinger = try icmp.Pinger.init(m.gpa, spreadConfig(window_ns, n_addr));
     defer pinger.deinit();
 
     // Pinger target ids are dense indexes; map them back to jobs.
@@ -1326,7 +1364,7 @@ test "history keeps 24 hours and reports gaps as null" {
     try testing.expectEqual(t0 + history_len * 60, t.history[m.slot(t0)].t);
     var aw: Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try m.writeSeries(&aw.writer, t, t0 + history_len * 60, .loss);
+    try m.writeSeries(&aw.writer, t, t0 + history_len * 60, history_len, .loss);
     try testing.expect(std.mem.endsWith(u8, aw.written(), "null,null,20"));
 }
 
@@ -1335,15 +1373,15 @@ test "the state is built once per change and shared" {
     defer m.deinit();
     m.cycle_s = 1 << 30; // no cycle boundary (which changes the tag) during the test
     const id = try m.add("a", "192.0.2.1", &.{});
-    const first = try m.state();
+    const first = try m.state(null);
     try testing.expectEqual(first.tag, m.stateTag());
     // The same tag: the same snapshot, shared, not rebuilt.
-    const again = try m.state();
+    const again = try m.state(null);
     try testing.expectEqual(first, again);
     again.release();
     try m.apply(id, .pause);
     try testing.expect(m.stateTag().version != first.tag.version);
-    const second = try m.state();
+    const second = try m.state(null);
     defer second.release();
     try testing.expect(second != first);
     try testing.expect(std.mem.find(u8, second.json, "\"paused\":true") != null);
@@ -1361,6 +1399,34 @@ test "the state is built once per change and shared" {
     const plain = try dec.reader.allocRemaining(testing.allocator, .unlimited);
     defer testing.allocator.free(plain);
     try testing.expectEqualStrings(second.json, plain);
+}
+
+test "a delta: the series from since on, shared, and the whole state when since is off" {
+    var m = testMonitor();
+    defer m.deinit();
+    const c: i64 = 1 << 30;
+    m.cycle_s = c; // no cycle boundary (which changes the tag) during the test
+    const id = try m.add("a", "192.0.2.1", &.{});
+    const end = m.stateTag().end;
+    fakeCycle(&m, id, end - c, 5);
+    fakeCycle(&m, id, end, 4);
+    const d = try m.state(end - c);
+    defer d.release();
+    try testing.expectEqual(@as(?i64, end - c), d.since);
+    // Two cycles: since, and the newest (20 % lost).
+    try testing.expect(std.mem.find(u8, d.json, "\"loss\":[0,20]") != null);
+    var buf: [64]u8 = undefined;
+    try testing.expect(std.mem.find(u8, d.json, try std.mem.print(&buf, "\"since\":{d},", .{end - c})) != null);
+    const again = try m.state(end - c);
+    defer again.release();
+    try testing.expectEqual(d, again);
+    // Not on a cycle boundary, older than the series, from the future: whole.
+    for ([_]i64{ end - @divExact(c, 2), end - history_len * c, end + c }) |off| {
+        const full = try m.state(off);
+        defer full.release();
+        try testing.expectEqual(@as(?i64, null), full.since);
+        try testing.expect(std.mem.find(u8, full.json, "\"since\"") == null);
+    }
 }
 
 test "health: cycles must keep finishing and probing must work" {
@@ -1542,7 +1608,7 @@ test "tags: validated, normalized, saved, loaded and served" {
     try testing.expectEqual(0, m2.targets.items[1].tags.len);
 
     // Served in the state, an empty list included.
-    const state = try m2.state();
+    const state = try m2.state(null);
     defer state.release();
     try testing.expect(std.mem.find(u8, state.json, "\"tags\":[\"ipv6\",\"core\"]") != null);
     try testing.expect(std.mem.find(u8, state.json, "\"tags\":[]") != null);

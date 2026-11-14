@@ -40,7 +40,7 @@ main, footer { max-width: 1100px; margin: 0 auto; padding: 0 16px; }
   position: sticky; top: 8px; z-index: 20;
   width: calc(100% - 32px); max-width: 1068px; margin: 16px auto 18px;
   background: var(--card); border: 1px solid var(--line); border-radius: 12px;
-  box-shadow: 0 6px 20px rgb(0 0 0 / 0.08); overflow: hidden;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.08);
 }
 .bar-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 14px; }
 /* Never taller than the window: the list stays reachable under it. */
@@ -55,9 +55,10 @@ main, footer { max-width: 1100px; margin: 0 auto; padding: 0 16px; }
 .bar-btn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
 .bar-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 #shown-mini:empty { display: none; }
-/* This cycle's probes, along the bottom edge (app.js renderLine). */
-.cycle-line { height: 3px; background: transparent; }
-.cycle-line.offline { background: repeating-linear-gradient(90deg, var(--paused) 0 6px, transparent 6px 12px); opacity: 0.6; }
+/* This cycle's probes (app.js renderLine): a track inside the bar, which
+   closes below it, so the line never lies on the list scrolling under it. */
+.cycle-line { height: 3px; margin: 0 14px 10px; border-radius: 2px; background-color: var(--line); }
+.cycle-line.offline { background-image: repeating-linear-gradient(90deg, var(--paused) 0 6px, transparent 6px 12px); opacity: 0.6; }
 
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand h1 { margin: 0; font-size: 20px; letter-spacing: -0.01em; }
@@ -315,7 +316,9 @@ button, input { font: inherit; }
 .pop-empty { padding: 8px 10px; font-size: 13px; color: var(--muted); }
 .pop-note { font-size: 12px; color: var(--muted); padding: 6px 10px; }
 .pop-note:empty { display: none; }
-.add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 18px; }
+/* The add form, at the end of the unfolded bar. */
+.add-title { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: -6px; }
+.add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .add input {
   flex: 1 1 180px; padding: 7px 10px; border-radius: 8px;
   border: 1px solid var(--line); background: var(--card); color: var(--text);

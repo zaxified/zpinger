@@ -523,8 +523,15 @@ fn route(monitor: *Monitor, req: *Request, rw: *ResponseWriter, arena: std.mem.A
             if (std.mem.eql(u8, path, "/favicon-" ++ v[0] ++ ".svg")) return send(rw, .ok, "image/svg+xml", faviconIn(v[1]));
         if (std.mem.eql(u8, path, "/api/state")) return sendState(monitor, req, rw);
         if (std.mem.eql(u8, path, "/api/live")) {
+            // `?cycle=C&from=N`: only the probes after the first N of cycle C,
+            // the ones a polling page has not seen yet (doc/api.md).
+            const num = struct {
+                fn of(q: []const u8, name: []const u8) ?u64 {
+                    return std.fmt.parseInt(u64, http.url.paramRaw(q, name) orelse return null, 10) catch null;
+                }
+            };
             var aw: Io.Writer.Allocating = .init(arena);
-            try monitor.writeLive(&aw.writer);
+            try monitor.writeLive(&aw.writer, .{ .cycle = num.of(req.query, "cycle"), .from = num.of(req.query, "from") orelse 0 });
             return send(rw, .ok, "application/json", aw.written());
         }
         if (std.mem.eql(u8, path, "/healthz")) {
@@ -727,29 +734,39 @@ fn readBody(req: *Request, arena: std.mem.Allocator) ![]u8 {
 /// lets a poll that finds nothing new end as `304 Not Modified`, no body.
 /// The state compresses to a fifth with gzip: compressed once per state,
 /// not per request (see `Snapshot.gzipped`).
+///
+/// `?since=END` (the `end` of the state the page has) asks for a delta: the
+/// series from that cycle on, a few bytes per target instead of the whole
+/// day (`Monitor.state`). A delta is not revalidated: the page asks for one
+/// only when the live view says the state changed.
 fn sendState(monitor: *Monitor, req: *Request, rw: *ResponseWriter) !void {
     var buf: [64]u8 = undefined;
     const accepts_gzip = http.gzip.acceptsGzip(req.header("accept-encoding"));
+    const since: ?i64 = if (http.url.paramRaw(req.query, "since")) |v| std.fmt.parseInt(i64, v, 10) catch null else null;
     // A 304 names the representation this client gets.
-    const current = etagOf(&buf, monitor.stateTag(), accepts_gzip);
-    if (ifNoneMatch(req, current))
-        return respond(rw, "", .{ .status = .not_modified, .cache_control = "no-cache", .etag = current, .vary = true });
-    const state = try monitor.state();
+    if (since == null) {
+        const current = etagOf(&buf, monitor.stateTag(), null, accepts_gzip);
+        if (ifNoneMatch(req, current))
+            return respond(rw, "", .{ .status = .not_modified, .cache_control = "no-cache", .etag = current, .vary = true });
+    }
+    const state = try monitor.state(since);
     defer state.release();
     const gzip = if (accepts_gzip) state.gzipped(monitor.io) else null;
     return respond(rw, gzip orelse state.json, .{
         .content_type = "application/json",
         .cache_control = "no-cache",
-        .etag = etagOf(&buf, state.tag, gzip != null),
+        .etag = etagOf(&buf, state.tag, state.since, gzip != null),
         .gzip = gzip != null,
         .vary = true,
     });
 }
 
-/// `"version-end"`, `"version-end-gzip"` for the compressed body: a
-/// different representation needs a different ETag.
-fn etagOf(buf: *[64]u8, tag: StateTag, gzip: bool) []const u8 {
-    return std.mem.print(buf, "\"{d}-{d}{s}\"", .{ tag.version, tag.end, if (gzip) "-gzip" else "" }) catch unreachable;
+/// `"version-end"`, `"version-end-since"` for a delta, `-gzip` after it for
+/// the compressed body: a different representation needs a different ETag.
+fn etagOf(buf: *[64]u8, tag: StateTag, since: ?i64, gzip: bool) []const u8 {
+    var s: [24]u8 = undefined;
+    const delta = if (since) |v| std.mem.print(&s, "-{d}", .{v}) catch unreachable else "";
+    return std.mem.print(buf, "\"{d}-{d}{s}{s}\"", .{ tag.version, tag.end, delta, if (gzip) "-gzip" else "" }) catch unreachable;
 }
 
 /// Whether an If-None-Match header lists `etag` (a weak comparison, as

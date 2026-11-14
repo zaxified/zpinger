@@ -9,7 +9,8 @@ const LIVE_MS = 2000;
 const STATE_FALLBACK_MS = 60000;
 const BEAT_PX = 9; // beat width + gap, see .beat in style.css
 let state = null;
-let live = null; // the last /api/live answer
+let live = null; // the last /api/live answer, its probes merged
+let liveById = new Map(); // its probes by target id
 let skew = 0; // server clock minus this browser's, ms
 let online = true;
 let lastHeard = Date.now(); // the last answer from the server
@@ -122,7 +123,10 @@ const describe = (t, i, at) =>
   (t.loss[i] === null
     ? `${time(at)} · no data`
     : `${time(at)} · ${ms(t.rtt[i])}` + (t.jitter[i] === null ? "" : ` ± ${ms(t.jitter[i])}`) + ` · ${t.loss[i]} % loss`);
-const time = (unix) => new Date(unix * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+// One formatter for every time on the page: making one per call (what
+// toLocaleTimeString does) cost most of a render with many targets.
+const HHMM = new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit" });
+const time = (unix) => HHMM.format(unix * 1000);
 
 // Figures over the last `cycles` cycles (default: all 24 hours).
 function summarize(t, cycles = t.rtt.length) {
@@ -158,23 +162,35 @@ let etag = null;
 
 // Loads may overlap (a poll, a change, the fallback); an answer older than
 // one already shown is dropped.
+//
+// Once the page has a state it asks only for what changed since its `end`
+// (`?since=`): the series from that cycle on, which it puts after its own,
+// a few bytes per target instead of the whole day every cycle. A delta that
+// does not fit (another sample-data hour of a demo, a new target, a gap of
+// more than a day) means the whole state again.
 let loadSeq = 0, shownSeq = 0;
-async function load() {
+async function load(full = false) {
   const seq = ++loadSeq;
   try {
+    const since = !full && state ? `?since=${state.end}` : "";
     // "no-cache": the browser revalidates with If-None-Match, and the server
     // answers 304 until the next cycle; nothing new means nothing to redraw.
-    const res = await fetch("api/state", { cache: "no-cache" });
+    const res = await fetch(`api/state${since}`, { cache: "no-cache" });
     if (!res.ok) throw new Error(res.statusText);
     const tag = res.headers.get("etag");
     if (seq < shownSeq) return;
     if (tag === null || tag !== etag) {
-      const next = await res.json();
+      let next = await res.json();
       if (seq < shownSeq) return;
+      if (next.since !== undefined) {
+        next = mergeDelta(state, next);
+        if (!next) return load(true);
+      }
+      etag = tag;
+      if (state && next.version === state.version && next.end === state.end) return heard();
       shownSeq = seq;
       const before = state;
       state = next;
-      etag = tag;
       render(before && changesSince(before, state));
     }
     heard();
@@ -183,14 +199,46 @@ async function load() {
   }
 }
 
+// `old` with the delta `d` put after it, or null when it does not fit.
+function mergeDelta(old, d) {
+  if (!old || d.since !== old.end || d.cycle_s !== old.cycle_s || d.demo_from !== old.demo_from) return null;
+  const known = new Map(old.targets.map((t) => [t.id, t]));
+  const shift = (d.end - d.since) / d.cycle_s;
+  for (const t of d.targets) {
+    const o = known.get(t.id);
+    if (!o || shift >= o.loss.length) return null;
+    // The old series without its newest cycle (the delta has it again,
+    // recorded by now), then the delta.
+    for (const key of ["rtt", "jitter", "loss"]) t[key] = o[key].slice(shift, o[key].length - 1).concat(t[key]);
+  }
+  delete d.since;
+  return d;
+}
+
 let livePolling = false;
 async function pollLive() {
   if (livePolling) return;
   livePolling = true;
   try {
-    const res = await fetch("api/live", { cache: "no-store" });
+    // Only the probes this page has not seen: after the first `from` of the
+    // cycle it has (a few hundred bytes every 2 s, however many targets).
+    const since = live ? `?cycle=${live.cycle}&from=${live.probes.length}` : "";
+    const res = await fetch(`api/live${since}`, { cache: "no-store" });
     if (!res.ok) throw new Error(res.statusText);
-    live = await res.json();
+    const next = await res.json();
+    if (next.from > 0) {
+      if (!live || next.cycle !== live.cycle || next.from !== live.probes.length) {
+        live = null; // out of step: the next poll asks for everything
+        return;
+      }
+      next.probes = live.probes.concat(next.probes);
+    }
+    live = next;
+    liveById = new Map();
+    for (const p of live.probes) {
+      if (!liveById.has(p[0])) liveById.set(p[0], []);
+      liveById.get(p[0]).push(p);
+    }
     skew = live.now - Date.now();
     heard();
     // A recorded cycle, a changed target, a new cycle: the state has it.
@@ -285,6 +333,9 @@ function render(anim) {
   const list = $("#targets");
   const expand = [];
   list.replaceChildren(...shown.map((t) => renderTarget(t, stats.get(t.id).day, expand, anim)));
+  // The beat strips once the rows are in the page: how many beats fit
+  // depends on the width each one got.
+  for (const t of shown) renderBeats($(`[data-target="${t.id}"] .beats`, list), t, anim);
   if (state.targets.length === 0) list.append(el("p", "empty", "No targets yet."));
   else if (shown.length === 0) {
     const p = el("p", "empty", "No target matches the filter. ");
@@ -305,7 +356,7 @@ function render(anim) {
 // ----- live: the cycle being probed ----------------------------------------------
 
 // The probes of target `t` in the cycle being probed, in order, [id, ms, rtt].
-const liveProbes = (t) => (live && state && live.cycle === state.end ? live.probes.filter((p) => p[0] === t.id) : []);
+const liveProbes = (t) => (live && state && live.cycle === state.end ? liveById.get(t.id) || [] : []);
 
 // The newest cycle is not recorded yet, and this one is probing it: its
 // beat is built from the probes so far.
@@ -374,15 +425,24 @@ function renderLine() {
   } else {
     // The last probe goes out 2 s before the next cycle (doc/how-it-works.md).
     const span = state.cycle_s * 1000 - 2000;
-    const pct = (ms) => Math.min(100, (100 * ms) / span).toFixed(2);
-    let prev = "0", stops = [];
+    const pct = (ms) => Math.min(100, (100 * ms) / span);
+    // Runs of one colour are one stretch: a few stops even for a thousand
+    // probes a cycle.
+    let prev = 0, start = 0, color = null;
+    const stops = [];
+    const flush = () => color && stops.push(`${color} ${start.toFixed(2)}% ${prev.toFixed(2)}%`);
     for (const [, at, rtt] of live.probes) {
-      const x = pct(at);
-      stops.push(`${rtt === null ? "var(--down)" : "var(--up)"} ${prev}% ${x}%`);
-      prev = x;
+      const c = rtt === null ? "var(--down)" : "var(--up)";
+      if (c !== color) {
+        flush();
+        color = c;
+        start = prev;
+      }
+      prev = Math.max(prev, pct(at));
     }
+    flush();
     lineStops = stops.join(", ");
-    lineLast = Number(prev);
+    lineLast = prev;
   }
   tickLine();
 }
@@ -395,9 +455,9 @@ function tickLine() {
   const cycleStart = Math.floor(now / (state.cycle_s * 1000)) * state.cycle_s * 1000;
   const head = Math.max(lineLast, Math.min(100, (100 * (now - cycleStart)) / span));
   const faint = "color-mix(in srgb, var(--accent) 35%, transparent)";
-  const parts = [lineStops, `${faint} ${lineLast}% ${head.toFixed(1)}%`, `transparent ${head.toFixed(1)}% 100%`].filter(Boolean);
+  const parts = [lineStops, `${faint} ${lineLast.toFixed(2)}% ${head.toFixed(1)}%`, `transparent ${head.toFixed(1)}% 100%`].filter(Boolean);
   const bg = online ? `linear-gradient(90deg, ${parts.join(", ")})` : "";
-  if (bg !== lineBg) line.style.background = lineBg = bg;
+  if (bg !== lineBg) line.style.backgroundImage = lineBg = bg;
   line.classList.toggle("offline", !online);
 }
 
@@ -518,9 +578,10 @@ function eventLine(e, withName) {
   return li;
 }
 
-// The list of `events`, newest first (ongoing ones on top), or why it is empty.
+// The list of `events`, the newest (the latest to start) on top, or why it
+// is empty.
 function fillFeed(events, withName, empty) {
-  events.sort((a, b) => b.ongoing - a.ongoing || b.to - a.to);
+  events.sort((a, b) => b.from - a.from || b.to - a.to);
   const list = el("ol");
   for (const e of events) list.append(eventLine(e, withName));
   if (!events.length) list.append(el("li", "none", empty));
@@ -749,7 +810,6 @@ function renderTarget(t, s, expand, anim) {
   }
   $(".uptime", node).textContent = s.uptime === null ? "–" : `${s.uptime.toFixed(s.uptime === 100 ? 0 : 2)} %`;
   $(".latency", node).textContent = ms(latencyOf(t, s));
-  renderBeats($(".beats", node), t, anim);
 
   const expandButton = $(".expand", node);
   expandButton.setAttribute("aria-label", `${t.name}: chart, figures and actions`);
@@ -778,7 +838,8 @@ function renderTarget(t, s, expand, anim) {
 // built from its probes so far (see liveBeat). On a new cycle the strip
 // slides left by one beat; a beat just recorded arrives.
 function renderBeats(box, t, anim) {
-  // As many recent cycles as fit; refit on resize via render().
+  // As many recent cycles as fit (the strip is in the page by now); refit
+  // on resize via render().
   const width = box.clientWidth || Math.min(window.innerWidth - 80, 540);
   const n = Math.max(10, Math.min(90, Math.floor(width / BEAT_PX)));
   const last = t.loss.length - 1;
@@ -791,8 +852,7 @@ function renderBeats(box, t, anim) {
     const b = el("span", "beat");
     const c = beatColor(t.loss[i]);
     if (c) b.style.setProperty("--c", c);
-    const at = state.end - (t.loss.length - 1 - i) * state.cycle_s;
-    b.title = describe(t, i, at);
+    b.dataset.i = i; // its tooltip is written when the pointer reaches it
     if (i === last && anim && anim.arrive.has(t.id)) b.classList.add("arrive");
     box.append(b);
   }
@@ -1276,7 +1336,20 @@ function placePicker() {
   const pop = $(".tag-popover");
   if (!pop) return;
   pop.style.left = "";
+  pop.style.top = "";
+  pop.style.position = "";
   const margin = 12;
+  // The add form's picker, in the bar: the bar's menu scrolls (it is never
+  // taller than the window) and would cut the picker off, so it hangs from
+  // the window instead, under the tag box.
+  const box = pop.closest("#add-tags");
+  if (box) {
+    const b = box.getBoundingClientRect();
+    pop.style.position = "fixed";
+    pop.style.top = `${b.bottom + 4}px`;
+    pop.style.left = `${Math.max(margin, Math.min(b.left, document.documentElement.clientWidth - margin - pop.offsetWidth))}px`;
+    return;
+  }
   const r = pop.getBoundingClientRect();
   const over = r.right - (document.documentElement.clientWidth - margin);
   if (over > 0) pop.style.left = `${-Math.min(over, r.left - margin)}px`;
@@ -1508,6 +1581,17 @@ function niceCeil(v) {
 
 // ----- startup -------------------------------------------------------------------
 
+// A beat's tooltip, written when the pointer first reaches it rather than
+// for every beat of every row on every render.
+$("#targets").addEventListener("pointerover", (ev) => {
+  const b = ev.target.closest(".beat[data-i]");
+  if (!b || b.title) return;
+  const t = state && state.targets.find((x) => x.id === Number(b.closest("[data-target]").dataset.target));
+  if (!t) return;
+  const i = Number(b.dataset.i);
+  b.title = describe(t, i, state.end - (t.loss.length - 1 - i) * state.cycle_s);
+});
+
 $("#add").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const form = ev.target;
@@ -1597,6 +1681,10 @@ try {
 } catch {}
 setMenu(menuOpen);
 $("#menu").addEventListener("click", () => setMenu($("#menu-body").hidden));
+$("#add-open").addEventListener("click", () => {
+  setMenu(true);
+  $("#add").name.focus();
+});
 $("#events").addEventListener("click", () => {
   feedOpen = !feedOpen;
   if (state) render();

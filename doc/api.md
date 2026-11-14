@@ -35,6 +35,17 @@ cycle, oldest first, `null` = no data:
 The answer carries an ETag: with `If-None-Match` it is `304` until the state
 changes. A client that accepts gzip gets it compressed (`"…-gzip"` ETag).
 
+`?since=END`, with the `end` of a state the client has, asks for a delta: the
+same answer, but the series hold only the cycles from `END` on (`END`
+included: it may have been recorded since), and `since` says so. Put them
+after your own series without its newest entry, shifted by `(end - END) /
+cycle_s`. A `since` that is not a cycle start within the last 24 hours gets
+the whole state (no `since` in the answer). The page asks for a delta every
+time the live view says the state changed: a few hundred bytes per target
+rather than the whole day (3.5 MB, 650 KB compressed, at 200 targets).
+Fetch the whole state again when `demo_from` changed (a demo renews its
+sample data every hour) or a target is new.
+
 The answer also has `version` (it changes with every recorded cycle and
 every change of the targets) and `end`, the start (unix s) of the newest
 cycle in the series.
@@ -49,8 +60,13 @@ when the answer came or the probe timed out (ms after the cycle start) and the
 round-trip time in ms, `null` = lost. A cycle's 5 probes per target are spread
 over the whole cycle ([how-it-works.md](how-it-works.md#how-a-cycle-works)).
 When `version` differs from the state's, or `cycle` is newer than its `end`,
-the state has something new. The page polls it every 2 s; it has no ETag (it is small,
-and `now` changes anyway).
+the state has something new. `count` is the number of probes so far. With
+`?cycle=C&from=N` (C the cycle the caller has, N the probes it has of it) the
+answer lists only the probes after the first N, and `from` says where they
+start; for another cycle, or an N past `count`, it lists them all (`from` is
+0). The page polls it every 2 s that way, so a poll carries only the probes
+of the last 2 s, however many targets there are. It has no ETag (`now`
+changes anyway).
 
 ## Changes
 

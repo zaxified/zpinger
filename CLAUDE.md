@@ -73,7 +73,13 @@ with the previous pin: a new default-on feature in a module arrives silently.
   built from its probes so far, the latency figure follows each probe, a new cycle slides
   the strip, a recorded beat "arrives", a status change flashes the row; the tab title
   counts nok targets and the favicon takes the worst colour.
-- Events (global under the bar, per target in the detail) are hidden by default.
+- Events (global under the bar, per target in the detail) are hidden by default; newest
+  (latest start) on top.
+- The add form lives in the unfolded bar (☰, or `+` in the folded row); the 3 px line sits
+  inside the bar, which closes below it (owner: the line over the list was distracting).
+- Scale (measured 2026-11-14, netns sim up to 1000 targets with a cap-raised test build): the
+  server holds 1000 (adaptive packet gap); the page needs the state delta (`?since=`) and
+  `/api/live?cycle=&from=` to stay light; a full redraw is ~90 ms at 64, ~300 ms at 200.
 - Editing happens in the row head (✎): name/host editor (`PATCH`, all or nothing) and a
   tag picker under its tags. Enter or click-outside saves only if changed, Esc cancels.
   No bottom sheet on phones (rejected).

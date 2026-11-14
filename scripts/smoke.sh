@@ -93,8 +93,20 @@ echo "$STATE" | grep -q '"name":"lo4"[^}]*"jitter":\[[^]]*[0-9]' || fail "no jit
 # The live view lists the probes of the running cycle as they come (empty
 # for a moment when a cycle starts).
 i=0
-until curl -sf "$URL/api/live" | grep -q '"cycle_s":5,"version":[0-9]*,"targets":\[[0-9,]*\],"probes":\[\[[0-9]*,[0-9]*,[0-9.]*\]'; do
+until curl -sf "$URL/api/live" | grep -q '"cycle_s":5,"version":[0-9]*,"targets":\[[0-9,]*\],"count":[0-9]*,"from":0,"probes":\[\[[0-9]*,[0-9]*,[0-9.]*\]'; do
     i=$((i + 1)); [ $i -lt 60 ] || fail "no answered probe in /api/live"; sleep 0.1
+done
+# A poll that names the cycle and the probes it has gets only the rest (a new
+# cycle may start in between: retry).
+since_ok() {
+    live=$(curl -sf "$URL/api/live")
+    c=$(echo "$live" | sed -n 's/.*"cycle":\([0-9]*\),.*/\1/p')
+    n=$(echo "$live" | sed -n 's/.*"count":\([0-9]*\),.*/\1/p')
+    curl -sf "$URL/api/live?cycle=$c&from=$n" | grep -q "\"from\":$n,"
+}
+i=0
+until since_ok; do
+    i=$((i + 1)); [ $i -lt 5 ] || fail "/api/live?cycle=&from= does not start at from"
 done
 
 # Polling with the ETag costs a body-less 304 until the state changes (a
