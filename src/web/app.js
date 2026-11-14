@@ -419,6 +419,14 @@ function render(anim) {
   if (window.scrollY !== y) window.scrollTo(0, y);
 }
 
+// A row's open detail drawn again although the state did not change (a
+// trace started or stopped: its actions differ).
+function redrawRow(id) {
+  const r = rows.get(id);
+  if (r) r.state = null;
+  render();
+}
+
 const PAGE = 20;
 let rowLimit = PAGE;
 let lastShown = [];
@@ -1070,7 +1078,7 @@ async function startTrace(t) {
   await traceCall("POST", t.id);
   traces.set(t.id, { data: null, stopped: null, error: null });
   pollTraces();
-  render();
+  redrawRow(t.id);
 }
 
 function stopTrace(id) {
@@ -1190,7 +1198,7 @@ function renderTrace(panel, t) {
   again.addEventListener("click", async () => {
     if (!tr.stopped) {
       stopTrace(t.id);
-      return render();
+      return redrawRow(t.id);
     }
     try {
       await traceCall("POST", t.id);
