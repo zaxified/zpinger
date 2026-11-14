@@ -675,6 +675,11 @@ pub const Monitor = struct {
             else => return err,
         };
         defer m.gpa.free(bytes);
+        return m.loadConfigBytes(bytes);
+    }
+
+    /// The target list from the text of a targets file (`loadConfig`).
+    pub fn loadConfigBytes(m: *Monitor, bytes: []const u8) !void {
         const parsed = try std.json.parseFromSlice(ConfigFile, m.gpa, bytes, .{});
         defer parsed.deinit();
         m.mutex.lockUncancelable(m.io);
@@ -727,19 +732,25 @@ pub const Monitor = struct {
         // The history is only nice to have: an unreadable file is moved
         // aside rather than keeping the daemon from starting (a restart
         // loop under systemd until someone notices).
-        const parsed = std.json.parseFromSlice(HistoryFile, m.gpa, bytes, .{}) catch |err| switch (err) {
+        m.loadHistoryBytes(bytes, Io.Clock.real.now(m.io).toSeconds()) catch |err| switch (err) {
             error.OutOfMemory => return err,
-            else => {
+            error.InvalidHistory => {
                 var bad_buf: [Io.Dir.max_path_bytes]u8 = undefined;
                 const bad = try std.mem.print(&bad_buf, "{s}.bad", .{path});
                 try Io.Dir.rename(.cwd(), path, .cwd(), bad, m.io);
-                log.warn("{s} is not a valid history ({t}), moved to {s}; starting without history", .{ path, err, bad });
-                return;
+                log.warn("{s} is not a valid history, moved to {s}; starting without history", .{ path, bad });
             },
+        };
+    }
+
+    /// The samples of a history file's text (`loadHistory`), at time `now`.
+    pub fn loadHistoryBytes(m: *Monitor, bytes: []const u8, now: i64) error{ OutOfMemory, InvalidHistory }!void {
+        const parsed = std.json.parseFromSlice(HistoryFile, m.gpa, bytes, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidHistory,
         };
         defer parsed.deinit();
         if (parsed.value.cycle_s != m.cycle_s) return; // slots would not line up
-        const now = Io.Clock.real.now(m.io).toSeconds();
         const oldest = now - history_len * m.cycle_s;
         m.mutex.lockUncancelable(m.io);
         defer m.mutex.unlock(m.io);
@@ -750,6 +761,9 @@ pub const Monitor = struct {
                 // From before the window, or from the future (a clock that
                 // was ahead): neither belongs in the series.
                 if (s[0] <= oldest or s[0] > now) continue;
+                // Not a cycle start: never written by zpinger, and it would
+                // move the start of a demo's real data off the cycles.
+                if (@mod(s[0], m.cycle_s) != 0) continue;
                 const sample: Sample = .{
                     .t = s[0],
                     .sent = fileValue(u8, s[1], probes_per_cycle) orelse continue,
@@ -1040,7 +1054,13 @@ fn validateTags(tags: []const []const u8) Error!void {
 /// A copy of validated `tags`, ASCII-lowercased and without duplicates.
 fn dupeTags(gpa: std.mem.Allocator, tags: []const []const u8) error{OutOfMemory}![][]u8 {
     var list: std.ArrayList([]u8) = try .initCapacity(gpa, tags.len);
-    errdefer freeTags(gpa, list.items);
+    // The list's whole buffer, not `items` (its length is what was filled so
+    // far): freeTags(list.items) leaked it when a tag's copy failed (found by
+    // the allocation-failure sweep, src/fuzz_test.zig).
+    errdefer {
+        for (list.items) |tag| gpa.free(tag);
+        list.deinit(gpa);
+    }
     outer: for (tags) |tag| {
         for (list.items) |have| if (std.ascii.eqlIgnoreCase(have, tag)) continue :outer;
         const copy = try gpa.dupe(u8, tag);

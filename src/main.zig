@@ -857,7 +857,7 @@ fn sendMonitorError(rw: *ResponseWriter, err: anyerror) !void {
 }
 
 /// One request through the real handler, as a client sees the answer.
-fn testRequest(monitor: *Monitor, wire: []const u8) !http.httptest.Recording {
+pub fn testRequest(monitor: *Monitor, wire: []const u8) !http.httptest.Recording {
     return http.httptest.record(std.testing.allocator, .{
         .handler = handle,
         .context = monitor,
@@ -974,6 +974,7 @@ test "routes: pages, HEAD, state with ETag and gzip, read-only, Host guard, body
 
 test {
     _ = @import("monitor.zig");
+    _ = @import("fuzz_test.zig");
     _ = @import("demo.zig");
     _ = @import("trace.zig");
 }

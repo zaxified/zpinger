@@ -33,6 +33,31 @@ sh scripts/smoke.sh   # end to end against a running binary: API, ETag, health, 
 sh scripts/package.sh # the .deb packages; smoke-tests the packaged binary first
 ```
 
+Before a release, `sh scripts/release-check.sh` (about 12 minutes, on a
+developer machine: it needs Chrome, curl and python3 `websockets`) checks
+what the gate cannot, at the 200 targets zpinger is tuned for, in a private
+network namespace:
+
+- **fuzz**: the history file, the targets file and the whole API (bodies,
+  query numbers, Host and X-Forwarded-For) through the testkit fuzz driver,
+  20 000 inputs each (`src/fuzz_test.zig`; every test run does 300 of each,
+  and every allocation failing in turn);
+- **scale**: one whole cycle (every probe inside it, loopback RTT, CPU,
+  memory, bytes a page fetches) and the page in headless Chrome (first rows,
+  a keystroke, a new cycle, a live poll, DOM size, no exception);
+- **load**: 150 page-like viewers checking every answer, a burst over the
+  connection cap, connection churn, slow readers, malformed requests and
+  concurrent edits (no crash, no 5xx, no leaked descriptor, no error in the
+  log), and 150 clients fetching the whole state at once;
+- **ui**: about 90 checks of the page's behaviour, and the scroll position
+  on a phone.
+
+The limits are in `tools/check/budgets.json`, each with why; a value outside
+fails. `--update-baseline` stores the numbers in `tools/check/baseline.json`
+when tagging: the next check warns about a metric twice as bad, inside its
+limit or not. The numbers are this machine's: a slower one may need wider
+limits, never a skipped check.
+
 The unit tests and `scripts/smoke.sh` send real ICMP; `scripts/netns-run`
 runs them in a private network namespace (unprivileged user namespaces
 needed), so they touch no real network. A `v*` tag runs `scripts/test.sh`

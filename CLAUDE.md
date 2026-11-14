@@ -39,6 +39,8 @@ step with every behaviour change; `doc/*.md` ships in the .deb.
   network namespace (loopback only) with `ping_group_range` opened; it needs unprivileged
   user namespaces (Ubuntu: `kernel.apparmor_restrict_unprivileged_userns=0`). Dependencies
   are fetched before entering it — the namespace has no network.
+- **Before a release: `sh scripts/release-check.sh`** (fuzz, scale, load, ui against
+  `tools/check/budgets.json`; doc/development.md), then `--update-baseline` with the tag.
 - Release: tag `vX.Y.Z` equal to `build.zig.zon`'s `.version` → `release.yml` runs the gate
   and publishes the debs with SHA256SUMS. Tag only after CI on the commit is green.
 

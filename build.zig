@@ -43,9 +43,22 @@ pub fn build(b: *std.Build) void {
     run.addPassthruArgs();
     b.step("run", "Run (pass options after --, e.g. -- --listen 127.0.0.1:8080)").dependOn(&run.step);
 
-    const tests = b.addTest(.{ .root_module = mod, .use_llvm = use_llvm });
+    // The tests also get zig-libs testkit (fuzz driver, goldens), which the
+    // daemon never links: a module of their own with one more import.
+    const test_mod = b.createModule(.{
+        .root_source_file = mod.root_source_file,
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "testkit", .module = zig_libs.module("testkit") }},
+    });
+    var it = mod.import_table.iterator();
+    while (it.next()) |e| test_mod.addImport(e.key_ptr.*, e.value_ptr.*);
+    const tests = b.addTest(.{ .name = "zpinger-test", .root_module = test_mod, .use_llvm = use_llvm });
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    // The test binary itself, for a fuzz verdict (src/fuzz_test.zig): a run
+    // step is cached and reads no environment, so ZPINGER_FUZZ needs the binary.
+    b.step("test-bin", "Install the unit test binary (zig-out/bin/zpinger-test)").dependOn(&b.addInstallArtifact(tests, .{}).step);
 
     // The about page for a demo hub, from deploy/about.json, into
     // zig-out/about/ (scripts/package.sh ships it in the .deb). A host tool, not

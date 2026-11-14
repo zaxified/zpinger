@@ -45,6 +45,13 @@ and these entries come from zig-fping's CHANGELOG.md.
   reader scrolls near the end, and each target's figures are computed once
   per state, in one pass: at 200 targets a keystroke in the search takes
   6 ms, a new cycle 22 ms (measured in headless Chrome).
+- **Fixed: a target's tags leaked when memory ran out while copying them**
+  (`dupeTags` freed the filled part of its list, not the list), found by the
+  new allocation-failure sweep.
+- **A release check** (`scripts/release-check.sh`, for maintainers): the
+  history file, the targets file and the whole API fuzzed with zig-libs
+  testkit's driver, the limits at 200 targets, a load test, the page in
+  headless Chrome, all against stated limits (`tools/check/budgets.json`).
 - **A client that stops reading the answer is no longer logged as a server
   error.** It was `handler_failed error=WriteFailed` at level err (found by
   a load test with slow readers); now `reason=write_aborted` at warn, like
