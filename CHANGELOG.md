@@ -37,6 +37,16 @@ and these entries come from zig-fping's CHANGELOG.md.
   cycles is one event (up to 5 clean cycles inside it do not end it), a DOWN
   one when some of its cycles lost every probe; a single cycle that lost one
   probe is left out.
+- **The demo list has 30 targets** (was 8), grouped by region (`europe`,
+  `americas`, `asia`, `oceania`, `africa`): Wikimedia's data centres, public
+  DNS and NTP servers and university mirrors from 11 ms to 300 ms away, plus
+  a second DOWN target that is acknowledged (`"acked": true`). A demo
+  target added to an existing demo gets sample data up to its own first
+  cycle (it had an empty stretch back to when the other targets' real data
+  began); the state gives each demo target its own `demo_from`.
+- **A target not probed yet is NEW** (badge and pill; was PENDING, which
+  did not fit the badge). The API status stays `pending`, and so does the
+  fragment's `st=pending`.
 - **Up to 200 targets** (was 64), the number zpinger is now measured and
   tuned for; `ZPINGER_MAX_TARGETS` raises it for testing (a warning at
   start). A big history is written every few cycles instead of every one:

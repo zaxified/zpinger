@@ -59,58 +59,72 @@ async def main():
             async def shot(name):
                 r = await cmd("Page.captureScreenshot", format="png")
                 open(f"{SHOTS}/{name}.png", "wb").write(base64.b64decode(r["data"]))
-            names = "[...document.querySelectorAll('#targets .name')].map(e => e.textContent)"
+            # Every row drawn first: the page draws 20 and more as one scrolls.
+            names = "rowLimit = 1e9; render(); [...document.querySelectorAll('#targets .name')].map(e => e.textContent)"
             await cmd("Runtime.enable")
             await vp(1100, 900, False)
 
             # --- demo: filter, search, sort ---
             await go(DEMO + "/")
+            # What each filter should leave, worked out here from the list
+            # the demo runs (the page's rule: every tag, every search word
+            # in the name, host or a tag), not taken from the page.
+            demo_targets = (await js("state"))["targets"]
+            N = len(demo_targets)
+            def expect(tags=(), q=""):
+                out = []
+                for t in demo_targets:
+                    hay = [x.lower() for x in [t["name"], t["host"], *t["tags"]]]
+                    if all(g in t["tags"] for g in tags) and all(any(w in h for h in hay) for w in q.lower().split()):
+                        out.append(t["name"])
+                return sorted(out)
             all_names = await js(names)
-            check(len(all_names) == 8, f"all 8 targets shown: {all_names}")
+            check(N >= 8 and len(all_names) == N, f"all {N} targets shown: {len(all_names)}")
             chips = await js("[...document.querySelectorAll('#tagbar .chip')].map(e => e.textContent)")
-            check(chips == ["asia", "cloudflare", "dns", "google", "ipv4", "ipv6", "ntp", "vpn", "web"], f"chips {chips}")
+            check(chips == sorted({g for t in demo_targets for g in t["tags"]}), f"chips {chips}")
             await js("[...document.querySelectorAll('#tagbar .chip')].find(c => c.textContent === 'dns').click()")
             await js("[...document.querySelectorAll('#tagbar .chip')].find(c => c.textContent === 'ipv6').click()")
             got = await js(names)
-            check(sorted(got) == ["Cloudflare DNS (IPv6)", "Google DNS (IPv6)"], f"dns AND ipv6: {got}")
+            want = expect(("dns", "ipv6"))
+            check(sorted(got) == want and len(want) >= 2, f"dns AND ipv6: {got}")
             check(await js("location.hash") == "#tags=dns,ipv6", f"hash {await js('location.hash')}")
-            check("2 of 8" in await js("$('#shown').textContent"), "count note")
+            check(f"{len(want)} of {N}" in await js("$('#shown').textContent"), "count note")
             await shot("filter-tags")
             await js("$('#shown .link').click()")
-            check(len(await js(names)) == 8, "clear shows all")
+            check(len(await js(names)) == N, "clear shows all")
             await js("const f = $('#find'); f.value = 'google'; f.dispatchEvent(new Event('input'))")
             got = await js(names)
-            check(sorted(got) == ["Google DNS", "Google DNS (IPv6)"], f"find google: {got}")
+            check(sorted(got) == expect(q="google") and len(got) >= 2, f"find google: {got}")
             await js("const f = $('#find'); f.value = 'ipv4 dns 9.9'; f.dispatchEvent(new Event('input'))")
-            check(await js(names) == ["Quad9 DNS"], f"find words AND: {await js(names)}")
+            check(await js(names) == expect(q="ipv4 dns 9.9") == ["Quad9 DNS"], f"find words AND: {await js(names)}")
             await js("const f = $('#find'); f.value = 'nothing-like-this'; f.dispatchEvent(new Event('input'))")
             check("No target matches" in await js("$('#targets').textContent"), "empty result message")
             await js("$('#targets .link').click()")
-            check(len(await js(names)) == 8 and await js("$('#find').value") == "", "Show all clears the search")
+            check(len(await js(names)) == N and await js("$('#find').value") == "", "Show all clears the search")
 
             # Status pills: always all eight, counts add up, a click filters.
             pills = "Object.fromEntries([...document.querySelectorAll('#summary .pill')].map(p => [p.textContent.replace(/^\\d+ /, ''), +p.textContent.split(' ')[0]]))"
             c = await js(pills)
-            check(list(c) == ["ok", "nok", "up", "down", "loss", "ack", "pending", "paused"], f"all pills: {c}")
+            check(list(c) == ["ok", "nok", "up", "down", "loss", "ack", "new", "paused"], f"all pills: {c}")
             total = len(await js(names))
-            check(c["up"] + c["loss"] + c["down"] + c["ack"] + c["pending"] + c["paused"] == total, "status counts add up")
-            check(c["ok"] + c["nok"] + c["ack"] + c["pending"] + c["paused"] == total, "health counts add up")
+            check(c["up"] + c["loss"] + c["down"] + c["ack"] + c["new"] + c["paused"] == total, "status counts add up")
+            check(c["ok"] + c["nok"] + c["ack"] + c["new"] + c["paused"] == total, "health counts add up")
             check(await js("$('#summary .pill.zero') !== null"), "empty pills shown, faint")
             click = lambda label: js(f"[...document.querySelectorAll('#summary .pill')].find(p => p.textContent.endsWith(' {label}')).click()")
             await click("down")
             badges = "[...document.querySelectorAll('#targets .badge')].map(e => e.textContent)"
-            check(await js(badges) == ["DOWN"] * c["down"], f"down only: {await js(badges)}")
+            check(await js("rowLimit = 1e9; render(); " + badges) == ["DOWN"] * c["down"], f"down only: {await js(badges)}")
             check(await js("location.hash") == "#st=down", f"hash {await js('location.hash')}")
             check(await js("[...document.querySelectorAll('#summary .pill')].find(p => p.textContent.endsWith(' down')).getAttribute('aria-pressed')") == "true", "pressed")
             await click("nok")
-            got = await js("[...document.querySelectorAll('#targets [data-target]')].map(r => { const t = state.targets.find(x => x.id == r.dataset.target); const h = 3600 / state.cycle_s; return statusOf(t) === 'down' || healthOf(t, {day: summarize(t), hour: summarize(t, h)}) === 'nok'; })")
+            got = await js("rowLimit = 1e9; render(); [...document.querySelectorAll('#targets [data-target]')].map(r => { const t = state.targets.find(x => x.id == r.dataset.target); const h = 3600 / state.cycle_s; return statusOf(t) === 'down' || healthOf(t, {day: summarize(t), hour: summarize(t, h)}) === 'nok'; })")
             check(len(got) == len(set(range(len(got)))) and all(got) and len(got) >= c["down"], f"down OR not ok: {len(got)} rows")
             check(len(got) == c["nok"] + sum(1 for b in await js(badges) if b == "ACK"), "the union, no more")  # DOWN is always not ok unless acked
             await js("$('#shown .link').click()")
             check(len(await js(names)) == total and await js("location.hash") == "", "clear drops the pills too")
             await js("[...document.querySelectorAll('#tagbar .chip')].find(c => c.textContent === 'google').click()")
             c = await js(pills)
-            check(sum(c[k] for k in ["up", "loss", "down", "ack", "pending", "paused"]) == 2, f"pills count the tag's targets: {c}")
+            check(sum(c[k] for k in ["up", "loss", "down", "ack", "new", "paused"]) == len(expect(("google",))), f"pills count the tag's targets: {c}")
             await click("ok")
             check(all(n.startswith("Google") for n in await js(names)), "pill AND tag")
             await go(DEMO + "/#st=nok,down")
@@ -123,7 +137,7 @@ async def main():
                 await js(f"const s = $('#sort'); s.value = '{key}'; s.dispatchEvent(new Event('change'))")
                 m, w = key.rstrip("1h24"), key[len(key.rstrip("1h24")):]
                 cycles = "60" if w == "1h" else "1440"
-                expr = f"[...document.querySelectorAll('#targets .name')].map(e => summarize(state.targets.find(t => t.name === e.textContent), {cycles}).{m})"
+                expr = f"rowLimit = 1e9; render(); [...document.querySelectorAll('#targets .name')].map(e => summarize(state.targets.find(t => t.name === e.textContent), {cycles}).{m})"
                 vals = await js(expr)
                 nums = [v for v in vals if v is not None]
                 check(nums == sorted(nums, reverse=True) and vals[:len(nums)] == nums, f"sort {key}: {[round(v, 2) if v is not None else None for v in vals]}")
@@ -169,7 +183,7 @@ async def main():
 
             # The fragment restores the view; the 1.0 form still opens a target.
             await go(DEMO + "/#tags=google&q=ipv6&sort=name&rev=1")
-            check(await js(names) == ["Google DNS (IPv6)"], "view from the fragment")
+            check(await js(names) == sorted(expect(("google",), "ipv6"), key=str.lower, reverse=True) == ["Google DNS (IPv6)"], "view from the fragment")
             check(await js("$('#find').value") == "ipv6" and await js("$('#sort').value") == "name", "controls from the fragment")
             await go(DEMO + "/#3")
             check(await js("[...document.querySelectorAll('.detail')].filter(d => !d.hidden).length") == 1, "legacy #3 opens a target")

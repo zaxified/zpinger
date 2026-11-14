@@ -32,6 +32,11 @@ cycle, oldest first, `null` = no data:
 - `jitter`: ms, `null` with fewer than two replies;
 - `loss`: %.
 
+With `--demo`, a target with sample data has `"sample": true` and its own
+`demo_from`: the cycles before it are sample data. It is the state's
+`demo_from` (the start of the real data), or later for a target added to
+the list after that.
+
 The answer carries an ETag: with `If-None-Match` it is `304` until the state
 changes. A client that accepts gzip gets it compressed (`"…-gzip"` ETag).
 

@@ -10,7 +10,7 @@ The page's default order, the most urgent on top:
    average, or more (one lost probe in an hour is not a problem);
 4. such a problem in the last 24 hours;
 5. ACK: an acknowledged outage, known and so below the unknown ones;
-6. the rest, then PENDING, then PAUSED.
+6. the rest, then NEW (not probed yet), then PAUSED.
 
 Within a tier, more packet loss and then more jitter go first, the last hour
 before the last 24 hours. The first three tiers are the `nok` pill; tiers

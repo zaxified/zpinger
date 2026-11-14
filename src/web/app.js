@@ -27,7 +27,7 @@ const PILLS = {
   down: ["down", "var(--down)", "Every probe of the last cycle lost"],
   degraded: ["loss", "var(--warn)", "Some probes of the last cycle lost"],
   acked: ["ack", "var(--ack)", "DOWN, and acknowledged"],
-  pending: ["pending", "var(--paused)", "Not probed yet"],
+  pending: ["new", "var(--paused)", "Not probed yet: a new target, or a new host"],
   paused: ["paused", "var(--paused)", "Not probed: paused"],
 };
 const HEALTH = ["ok", "nok"];
@@ -99,7 +99,8 @@ const STATUS = {
   down: ["DOWN", "var(--down)"],
   acked: ["ACK", "var(--ack)"],
   paused: ["PAUSED", "var(--paused)"],
-  pending: ["PENDING", "var(--paused)"],
+  // "NEW", not "PENDING": the badge column is as wide as the short labels.
+  pending: ["NEW", "var(--paused)"],
 };
 const statusOf = (t) => (t.status === "down" && t.acked ? "acked" : t.status);
 
@@ -115,8 +116,10 @@ const percentile = (a, p) => {
   return sorted[Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1)];
 };
 // One cycle, for the beat strip and the chart tooltip. A demo marks the
-// sample data (everything before demo_from).
-const isSample = (t, at) => t.sample && at < state.demo_from;
+// sample data: everything before the target's own demo_from (later than the
+// state's for a target that joined the list after the real data began).
+const sampleFrom = (t) => t.demo_from ?? state.demo_from;
+const isSample = (t, at) => t.sample && at < sampleFrom(t);
 const describe = (t, i, at) =>
   (isSample(t, at) ? "sample data · " : "") +
   (t.loss[i] === null
@@ -1691,7 +1694,7 @@ function renderChart(box, t) {
     svg.append(label);
   }
   // A demo: shade the sample data, so nobody takes it for a real record.
-  const real = n - 1 - (state.end - state.demo_from) / state.cycle_s;
+  const real = n - 1 - (state.end - sampleFrom(t)) / state.cycle_s;
   if (t.sample && real > 0) {
     svg.append(svgEl("rect", { class: "sample", x: L, y: T, width: Math.min(x(real), W - R) - L, height: H - T - B }));
     const label = svgEl("text", { class: "axis", x: L + 6, y: T + 12 });

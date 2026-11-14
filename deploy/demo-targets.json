@@ -7,6 +7,31 @@
     { "id": 5, "name": "Quad9 DNS", "host": "9.9.9.9", "tags": ["dns", "ipv4"], "demo": "flapping" },
     { "id": 6, "name": "Wikimedia (IPv6)", "host": "2a02:ec80:300:ed1a::1", "tags": ["web", "ipv6"], "demo": "outage" },
     { "id": 7, "name": "NICT NTP, Tokyo", "host": "133.243.238.243", "tags": ["ntp", "asia", "ipv4"], "demo": "long_haul" },
-    { "id": 8, "name": "Branch office VPN", "host": "203.0.113.10", "tags": ["vpn", "ipv4"], "demo": "down" }
+    { "id": 8, "name": "Branch office VPN", "host": "203.0.113.10", "tags": ["vpn", "ipv4"], "demo": "down" },
+
+    { "id": 9, "name": "Wikimedia Amsterdam", "host": "text-lb.esams.wikimedia.org", "tags": ["web", "wikimedia", "europe"], "demo": "steady" },
+    { "id": 10, "name": "Wikimedia Marseille", "host": "text-lb.drmrs.wikimedia.org", "tags": ["web", "wikimedia", "europe"], "demo": "evening_congestion" },
+    { "id": 11, "name": "CZ.NIC ODVR", "host": "193.17.47.1", "tags": ["dns", "europe", "ipv4"], "demo": "steady" },
+    { "id": 12, "name": "CZ.NIC ODVR (IPv6)", "host": "2001:148f:ffff::1", "tags": ["dns", "europe", "ipv6"], "demo": "route_change" },
+    { "id": 13, "name": "CZ.NIC NTP", "host": "ntp.nic.cz", "tags": ["ntp", "europe"], "demo": "steady" },
+    { "id": 14, "name": "Netnod NTP, Stockholm", "host": "sth1.ntp.se", "tags": ["ntp", "europe"], "demo": "flapping" },
+    { "id": 15, "name": "K-root (RIPE NCC)", "host": "k.root-servers.net", "tags": ["dns", "root"], "demo": "steady" },
+    { "id": 16, "name": "Tele2 speed test", "host": "speedtest.tele2.net", "tags": ["europe"], "demo": "bufferbloat" },
+    { "id": 17, "name": "Scaleway, Paris", "host": "ping.online.net", "tags": ["europe"], "demo": "evening_congestion" },
+
+    { "id": 18, "name": "Wikimedia Ashburn", "host": "text-lb.eqiad.wikimedia.org", "tags": ["web", "wikimedia", "americas"], "demo": "steady" },
+    { "id": 19, "name": "Wikimedia Dallas", "host": "text-lb.codfw.wikimedia.org", "tags": ["web", "wikimedia", "americas"], "demo": "outage" },
+    { "id": 20, "name": "Wikimedia San Francisco", "host": "text-lb.ulsfo.wikimedia.org", "tags": ["web", "wikimedia", "americas"], "demo": "long_haul" },
+    { "id": 21, "name": "Wikimedia São Paulo", "host": "text-lb.magru.wikimedia.org", "tags": ["web", "wikimedia", "americas"], "demo": "long_haul" },
+    { "id": 22, "name": "NIST Internet Time", "host": "time.nist.gov", "tags": ["ntp", "americas"], "demo": "long_haul" },
+    { "id": 23, "name": "XMission mirror, Salt Lake City", "host": "mirror.xmission.com", "tags": ["mirror", "americas"], "demo": "bufferbloat" },
+
+    { "id": 24, "name": "Wikimedia Singapore", "host": "text-lb.eqsin.wikimedia.org", "tags": ["web", "wikimedia", "asia"], "demo": "long_haul" },
+    { "id": 25, "name": "JAIST mirror, Ishikawa", "host": "ftp.jaist.ac.jp", "tags": ["mirror", "asia"], "demo": "long_haul" },
+    { "id": 26, "name": "USTC mirror, Hefei", "host": "mirrors.ustc.edu.cn", "tags": ["mirror", "asia"], "demo": "flapping" },
+    { "id": 27, "name": "KKU mirror, Khon Kaen", "host": "mirror.kku.ac.th", "tags": ["mirror", "asia"], "demo": "steady" },
+    { "id": 28, "name": "AARNet mirror, Australia", "host": "mirror.aarnet.edu.au", "tags": ["mirror", "oceania"], "demo": "long_haul" },
+    { "id": 29, "name": "TENET mirror, South Africa", "host": "mirror.ac.za", "tags": ["mirror", "africa"], "demo": "long_haul" },
+    { "id": 30, "name": "Warehouse link", "host": "203.0.113.20", "tags": ["vpn", "ipv4"], "demo": "down", "acked": true }
   ]
 }

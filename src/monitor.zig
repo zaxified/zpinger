@@ -83,6 +83,11 @@ pub const Target = struct {
     dns_error: ?[]const u8 = null,
     /// Sample-data scenario for `Monitor.demo`.
     scenario: ?demo.Scenario = null,
+    /// Where this target's real data starts in a demo: everything older is
+    /// sample data. Later than `Monitor.demo_from` for a target that joined
+    /// the list after the real data began (otherwise its first hours would
+    /// be empty). 0 = not filled yet.
+    demo_from: i64 = 0,
     last: Sample = .{},
     /// Ring buffer indexed by cycle number, see `slot()`.
     history: [history_len]Sample = @splat(.{}),
@@ -626,10 +631,21 @@ pub const Monitor = struct {
         const oldest = t - (history_len - 1) * m.cycle_s;
         for (m.targets.items) |target| {
             const scenario = target.scenario orelse continue;
+            // This target's real data starts at its first real cycle in the
+            // window: a target added to the list later gets sample data up
+            // to its own start, not a gap. Not probed yet: up to now.
+            var own = t + m.cycle_s;
+            var at = live_from;
+            while (at <= t) : (at += m.cycle_s) {
+                if (target.history[m.slot(at)].t == at) {
+                    own = at;
+                    break;
+                }
+            }
+            target.demo_from = own;
             // The sample past is scaled to the target's real median latency.
             var real: [history_len]u32 = undefined;
             var n: usize = 0;
-            var at = live_from;
             while (at <= t) : (at += m.cycle_s) {
                 const s = target.history[m.slot(at)];
                 if (s.t == at and s.recv > 0 and n < real.len) {
@@ -639,10 +655,10 @@ pub const Monitor = struct {
             }
             const base_ms: f64 = if (n > 0) @as(f64, @floatFromInt(median(real[0..n]))) / 1000 else 20;
 
-            var when = live_from - m.cycle_s;
+            var when = own - m.cycle_s;
             while (when >= oldest) : (when -= m.cycle_s) {
                 var rtts: [probes_per_cycle]u32 = undefined;
-                const replies = demo.probes(scenario, target.id, when, base_ms, live_from, &rtts);
+                const replies = demo.probes(scenario, target.id, when, base_ms, own, &rtts);
                 var sample: Sample = .{ .t = when, .sent = probes_per_cycle };
                 summarize(&sample, rtts[0..replies]);
                 target.history[m.slot(when)] = sample;
@@ -800,7 +816,7 @@ pub const Monitor = struct {
             var first = true;
             // Sample data is regenerated, never kept: a history file must
             // not hand made-up outages to an instance without --demo.
-            const sample_before = if (m.demo and t.scenario != null) m.demo_from else 0;
+            const sample_before = if (m.demo and t.scenario != null) @max(m.demo_from, t.demo_from) else 0;
             for (t.history) |s| {
                 if (s.t == 0 or s.t < sample_before) continue;
                 w.print("{s}[{d},{d},{d},{d},{d}]", .{ if (first) "" else ",", s.t, s.sent, s.recv, s.rtt_us, s.jitter_us }) catch return;
@@ -957,6 +973,8 @@ pub const Monitor = struct {
                     std.json.fmt(t.last_error, .{}), m.demo and t.scenario != null,
                 },
             );
+            // A demo target's own start of the real data (see `Target.demo_from`).
+            if (m.demo and t.scenario != null) try w.print(",\"demo_from\":{d}", .{@max(m.demo_from, t.demo_from)});
             try writeTags(w, t.tags, ",\"tags\":");
             if (t.addr) |a| try w.print(",\"address\":\"{f}\"", .{a.toIp()}) else try w.writeAll(",\"address\":null");
             try w.print(",\"dns\":\"{t}\"", .{t.dns});
@@ -1627,6 +1645,41 @@ test "demo: a slow first cycle does not scale the sample data for an hour" {
     fakeCycle(&m, id, hour + 1200, 5);
     m.demoFillLocked(hour + 1200);
     try testing.expectEqual(@as(u32, 10), m.demo_fills);
+}
+
+test "demo: a target added later gets sample data up to its own first cycle" {
+    var m = testMonitor();
+    defer m.deinit();
+    m.demo = true;
+    const old_id = try m.add("old", "192.0.2.1", &.{});
+    const new_id = try m.add("new", "192.0.2.2", &.{});
+    const old = m.targets.items[0];
+    const new = m.targets.items[1];
+    old.scenario = .steady;
+    new.scenario = .steady;
+    const hour: i64 = 1_700_006_400;
+    // The real data starts at `hour`; the new target joins the list 2 h later.
+    for (0..3 * 60) |i| fakeCycle(&m, old_id, hour + 60 * @as(i64, @intCast(i)), 5);
+    for (2 * 60..3 * 60) |i| fakeCycle(&m, new_id, hour + 60 * @as(i64, @intCast(i)), 5);
+    m.demo_since = hour;
+    m.demoFillLocked(hour + 3 * 3600 - 60);
+    try testing.expectEqual(hour, m.demo_from);
+    try testing.expectEqual(hour, old.demo_from);
+    try testing.expectEqual(hour + 2 * 3600, new.demo_from);
+    // Its first two hours are sample data, not a gap; its real data stays.
+    const sample = new.history[m.slot(hour + 3600)];
+    try testing.expectEqual(hour + 3600, sample.t);
+    try testing.expectEqual(probes_per_cycle, sample.sent);
+    try testing.expectEqual(5, new.history[m.slot(hour + 2 * 3600)].recv);
+    try testing.expectEqual(5, old.history[m.slot(hour + 3600)].recv);
+    // A target not probed yet is sample data up to now.
+    _ = try m.add("later", "192.0.2.3", &.{});
+    const later = m.targets.items[2];
+    later.scenario = .steady;
+    m.demo_hour = 0;
+    m.demoFillLocked(hour + 3 * 3600);
+    try testing.expectEqual(hour + 3 * 3600 + 60, later.demo_from);
+    try testing.expectEqual(hour + 3 * 3600, later.history[m.slot(hour + 3 * 3600)].t);
 }
 
 test "demo: real samples from the history file stay real" {

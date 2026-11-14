@@ -124,7 +124,9 @@ than the last 12 full hours of real probing (or than the start of the real
 data, whichever is later) is replaced with sample data; the page shades it
 and marks it "sample data", tooltips included. The real data starts with the
 daemon, or earlier with what the history file (`--history`) kept from the
-last run, so a restart does not throw the live half away. Only targets with a `"demo"`
+last run, so a restart does not throw the live half away. A target added to
+the list later gets sample data up to its own first cycle, not an empty
+stretch. Only targets with a `"demo"`
 scenario get it:
 
 ```json

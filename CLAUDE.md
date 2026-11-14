@@ -62,8 +62,8 @@ with the previous pin: a new default-on feature in a module arrives silently.
   (`#open=&tags=&q=&sort=&rev=&st=`).
 - A problem is **mean loss ≥ 1 % or mean jitter ≥ 10 ms** over the window (since 2026-11-14
   jitter compares probes a fifth of the cycle apart, ~11.6 s; threshold kept, owner OK). "Problems first"
-  tiers: DOWN → LOSS now → problem 1 h → problem 24 h → ACK → rest → PENDING → PAUSED.
-- Status pills (`ok · nok | up · down · loss · ack · pending · paused`) are always rendered
+  tiers: DOWN → LOSS now → problem 1 h → problem 24 h → ACK → rest → NEW (status `pending`) → PAUSED.
+- Status pills (`ok · nok | up · down · loss · ack · new · paused`; `new` = status `pending`, labelled NEW since 2026-11-14 because PENDING overflowed the badge) are always rendered
   (0 faint), OR among themselves, AND with tags and search; counts are facets.
 - The top bar floats (sticky) and is folded by default (owner, 2026-11-14): its one line
   holds the logo (its ring counts down to the next cycle, grey when the server does not
