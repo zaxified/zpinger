@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zig 0.17](https://img.shields.io/badge/Zig-0.17-f7a41d.svg)](https://ziglang.org)
 
-A small ping monitor: a daemon that pings your hosts once a minute and serves
+A small ping monitor: a daemon that pings your hosts five times a minute and serves
 a web page with their status, latency and packet loss over the last 24
 hours, plus a live trace of the route to any of them. One static binary,
 shipped as a Debian package; no root needed.
@@ -69,6 +69,11 @@ reverse proxy, CrowdSec ([deploying](doc/deploying.md)).
 
 - one row per host: its status, a strip of recent cycles (green: all
   replies, orange: some lost, red: all lost), 24-hour uptime and latency;
+- **live**: the probes are spread over the whole minute, and the page shows
+  each one as it comes, in the newest beat of every row and along the bar
+  at the top; the tab's title counts the hosts that need attention;
+- **events**: the outages and losses of the last 24 hours, for all hosts or
+  for one;
 - a click opens the 24-hour latency chart with packet loss underneath, and
   the averages, 95th percentile, jitter, loss and uptime;
 - **live trace** (like mtr): the route hop by hop, loss and latency per hop,

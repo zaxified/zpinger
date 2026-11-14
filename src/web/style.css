@@ -33,19 +33,43 @@ body {
   color: var(--text);
   font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
-header, main, footer { max-width: 1100px; margin: 0 auto; padding: 0 16px; }
+main, footer { max-width: 1100px; margin: 0 auto; padding: 0 16px; }
 
-header {
-  display: flex; flex-wrap: wrap; gap: 12px;
-  align-items: center; justify-content: space-between;
-  padding-top: 28px; padding-bottom: 20px;
+/* The bar floats at the top of the window, over the list. */
+.bar {
+  position: sticky; top: 8px; z-index: 20;
+  width: calc(100% - 32px); max-width: 1068px; margin: 16px auto 18px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.08); overflow: hidden;
 }
+.bar-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 14px; }
+/* Never taller than the window: the list stays reachable under it. */
+.bar-body { display: flex; flex-direction: column; gap: 12px; padding: 2px 14px 12px; max-height: calc(100vh - 110px); overflow-y: auto; }
+.bar-body[hidden], .bar.open .health-row, .bar.open #shown-mini { display: none; }
+.bar-buttons { display: flex; gap: 6px; margin-left: auto; }
+.bar-btn {
+  padding: 4px 11px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--text);
+}
+.bar-btn:hover { border-color: var(--accent); }
+.bar-btn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+.bar-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#shown-mini:empty { display: none; }
+/* This cycle's probes, along the bottom edge (app.js renderLine). */
+.cycle-line { height: 3px; background: transparent; }
+.cycle-line.offline { background: repeating-linear-gradient(90deg, var(--paused) 0 6px, transparent 6px 12px); opacity: 0.6; }
+
 .brand { display: flex; align-items: center; gap: 10px; }
-.brand h1 { margin: 0; font-size: 22px; letter-spacing: -0.01em; }
-.logo {
-  width: 14px; height: 14px; border-radius: 50%;
-  background: var(--up); box-shadow: 0 0 0 4px color-mix(in srgb, var(--up) 25%, transparent);
-}
+.brand h1 { margin: 0; font-size: 20px; letter-spacing: -0.01em; }
+/* The dot, and around it a ring that counts down to the next cycle. */
+.logo { position: relative; flex: none; width: 24px; height: 24px; }
+.logo svg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+.logo .ring-track { fill: none; stroke: color-mix(in srgb, var(--up) 18%, transparent); stroke-width: 3.5; }
+.logo .ring { fill: none; stroke: var(--up); stroke-width: 3.5; stroke-linecap: round; }
+.logo .dot { position: absolute; inset: 7px; border-radius: 50%; background: var(--up); }
+.logo.offline .ring { stroke: transparent; }
+.logo.offline .ring-track { stroke: color-mix(in srgb, var(--paused) 30%, transparent); }
+.logo.offline .dot { background: var(--paused); }
 .tag {
   font-size: 12px; padding: 2px 8px; border-radius: 999px;
   border: 1px solid var(--line); color: var(--muted);
@@ -67,7 +91,7 @@ button.pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .pill.health { font-weight: 600; }
 .pill-sep { width: 1px; align-self: stretch; margin: 2px 2px; background: var(--line); }
 
-.toolbar { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; margin-bottom: 14px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; }
 #find, #sort, #order {
   padding: 6px 10px; border-radius: 8px;
   border: 1px solid var(--line); background: var(--card); color: var(--text);
@@ -163,10 +187,48 @@ button.pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .beats { display: flex; gap: 3px; justify-content: flex-end; min-width: 0; overflow: hidden; height: 26px; }
 .beat { flex: 0 0 6px; border-radius: 3px; background: var(--c, var(--empty)); }
 .beat:hover { transform: scaleY(1.15); }
+/* A new cycle: the strip slides left by one beat; a recorded one arrives. */
+.beats.slide { animation: slide 0.5s ease-out; }
+@keyframes slide { from { transform: translateX(9px); } to { transform: none; } }
+.beat.arrive { animation: arrive 0.9s ease-out; }
+@keyframes arrive { 0% { transform: scaleY(0.2); filter: brightness(1.8); } 60% { transform: scaleY(1.1); } 100% { transform: none; filter: none; } }
+/* The cycle being probed, built bottom-up from its probes. */
+.beat.live {
+  display: flex; flex-direction: column-reverse; gap: 1px; background: none;
+  outline: 1px dashed color-mix(in srgb, var(--muted) 70%, transparent); outline-offset: 1px;
+}
+.beat.live i { flex: 1; border-radius: 1.5px; background: var(--empty); }
+.beat.live i.ok { background: var(--up); }
+.beat.live i.lost { background: var(--down); }
+.beat.live i.fresh { animation: seg 0.7s ease-out; }
+@keyframes seg { from { filter: brightness(2); transform: scaleX(1.6); } to { filter: none; transform: none; } }
+/* A new status: the row flashes in its colour, the badge pops. */
+.target.flash { animation: flash 1.8s ease-out; }
+@keyframes flash { 0% { box-shadow: 0 0 0 3px var(--fc); border-color: var(--fc); } 100% { box-shadow: 0 0 0 0 transparent; } }
+.target.flash .badge { animation: pop 0.6s ease-out 2; }
+@keyframes pop { 50% { transform: scale(1.15); } }
 
 .figures { display: flex; flex-direction: column; align-items: flex-end; font-variant-numeric: tabular-nums; min-width: 92px; }
 .uptime { font-weight: 600; }
-.latency { color: var(--muted); font-size: 13px; }
+.latency { color: var(--muted); font-size: 13px; border-radius: 4px; padding: 0 3px; margin-right: -3px; }
+.latency.fresh { animation: lat 1s ease-out; }
+@keyframes lat { from { background: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--text); } to { background: transparent; } }
+
+/* Events: the global feed under the bar, and one in a row's detail. */
+.feed { font-size: 13px; }
+#feed { margin-bottom: 14px; padding: 10px 14px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); }
+.row-feed { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.feed[hidden] { display: none; }
+.feed-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; cursor: help; }
+.feed ol { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 3px; max-height: 260px; overflow-y: auto; }
+.feed li { display: grid; grid-template-columns: minmax(13ch, max-content) 10px 1fr; gap: 8px; align-items: center; font-variant-numeric: tabular-nums; }
+.feed li time { color: var(--muted); white-space: nowrap; }
+.feed li .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+.feed li.sample { color: var(--muted); }
+.feed li .tag { margin-left: 6px; font-size: 11px; padding: 0 6px; }
+.feed li.none { display: block; color: var(--muted); }
+.feed .link { font-weight: 600; text-decoration: none; color: var(--text); }
+.feed .link:hover { color: var(--accent); text-decoration: underline; }
 
 .detail { border-top: 1px solid var(--line); padding: 16px 18px 18px; }
 .chart { position: relative; }
@@ -277,4 +339,12 @@ footer a { color: inherit; }
   .hops td.hop-host .hop-addr + .hop-addr { margin-top: 2px; }
   .hops th, .hops td { padding-left: 5px; padding-right: 5px; }
   .hops .spark svg { width: 80px; }
+  .bar { width: calc(100% - 16px); margin-top: 8px; }
+  .bar-row { padding: 8px 10px; gap: 8px 10px; }
+  .bar-body { padding: 2px 10px 10px; }
+  .brand h1 { font-size: 18px; }
+  .feed li { grid-template-columns: auto 10px 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .beats.slide, .beat.arrive, .beat.live i.fresh, .target.flash, .target.flash .badge, .latency.fresh { animation: none; }
 }

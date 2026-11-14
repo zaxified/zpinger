@@ -6,6 +6,7 @@ The page uses this API and nothing else; scripts can too. `ID` is a target's
 | Method | Path | |
 |---|---|---|
 | `GET` | `/api/state` | everything the page shows ([below](#get-apistate)) |
+| `GET` | `/api/live` | the cycle being probed, probe by probe ([below](#get-apilive)) |
 | `POST` | `/api/targets` | add a target |
 | `PATCH` | `/api/targets/ID` | rename, move to another host, retag |
 | `DELETE` | `/api/targets/ID` | remove |
@@ -33,6 +34,23 @@ cycle, oldest first, `null` = no data:
 
 The answer carries an ETag: with `If-None-Match` it is `304` until the state
 changes. A client that accepts gzip gets it compressed (`"…-gzip"` ETag).
+
+The answer also has `version` (it changes with every recorded cycle and
+every change of the targets) and `end`, the start (unix s) of the newest
+cycle in the series.
+
+## `GET /api/live`
+
+The cycle being probed: `now` (the server's clock, unix ms), `cycle` (its
+start, unix s), `cycle_s`, `version` (the state's), `targets` (the ids it
+probes; one added during the cycle joins the next) and `probes`, every probe
+answered or given up on so far, in that order, as `[id, ms, rtt]`: the target,
+when the answer came or the probe timed out (ms after the cycle start) and the
+round-trip time in ms, `null` = lost. A cycle's 5 probes per target are spread
+over the whole cycle ([how-it-works.md](how-it-works.md#how-a-cycle-works)).
+When `version` differs from the state's, or `cycle` is newer than its `end`,
+the state has something new. The page polls it every 2 s; it has no ETag (it is small,
+and `now` changes anyway).
 
 ## Changes
 

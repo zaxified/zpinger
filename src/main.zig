@@ -4,7 +4,7 @@
 //! last 24 hours: status, latency and packet loss per target, plus buttons to
 //! add, remove, pause and acknowledge targets. `--read-only` turns the page
 //! into a public demo: the server refuses every change, not just the page;
-//! `--demo` also fills the history older than an hour with sample data.
+//! `--demo` also fills the history older than 12 hours with sample data.
 
 const std = @import("std");
 const Io = std.Io;
@@ -34,7 +34,7 @@ const usage =
     \\  --targets FILE       target list, JSON (default targets.json)
     \\  --history FILE       keep the 24 h history across restarts (default: memory only)
     \\  --read-only          public demo: refuse every change
-    \\  --demo               --read-only, plus sample data older than the last hour (doc/deploying.md)
+    \\  --demo               --read-only, plus sample data older than 12 hours (doc/deploying.md)
     \\  --allow-host NAME    also answer to this host name (repeatable); see
     \\                       doc/configuration.md
     \\  --cycle SECONDS      seconds between probing cycles (default 60)
@@ -405,6 +405,12 @@ const app_js = @embedFile("web/app.js");
 const style_css = @embedFile("web/style.css");
 const favicon_svg = @embedFile("web/favicon.svg");
 
+/// favicon.svg in another colour.
+fn faviconIn(comptime color: []const u8) []const u8 {
+    return "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\"><circle cx=\"16\" cy=\"16\" r=\"15\" fill=\"" ++ color ++
+        "\" opacity=\".25\"/><circle cx=\"16\" cy=\"16\" r=\"9\" fill=\"" ++ color ++ "\"/></svg>";
+}
+
 /// Sent with every response. The page loads nothing from other origins and
 /// has no inline script, so the policy can be strict.
 const security_headers = [_]http.Header{
@@ -511,7 +517,16 @@ fn route(monitor: *Monitor, req: *Request, rw: *ResponseWriter, arena: std.mem.A
         if (std.mem.eql(u8, path, "/app.js")) return send(rw, .ok, "text/javascript", app_js);
         if (std.mem.eql(u8, path, "/style.css")) return send(rw, .ok, "text/css", style_css);
         if (std.mem.eql(u8, path, "/favicon.svg")) return send(rw, .ok, "image/svg+xml", favicon_svg);
+        // The page's icon in the colour of the worst status (app.js renderTab):
+        // served, as the content security policy allows no data: images.
+        inline for (.{ .{ "up", "#2fb36d" }, .{ "warn", "#f0a020" }, .{ "down", "#e5484d" }, .{ "idle", "#9aa5b1" } }) |v|
+            if (std.mem.eql(u8, path, "/favicon-" ++ v[0] ++ ".svg")) return send(rw, .ok, "image/svg+xml", faviconIn(v[1]));
         if (std.mem.eql(u8, path, "/api/state")) return sendState(monitor, req, rw);
+        if (std.mem.eql(u8, path, "/api/live")) {
+            var aw: Io.Writer.Allocating = .init(arena);
+            try monitor.writeLive(&aw.writer);
+            return send(rw, .ok, "application/json", aw.written());
+        }
         if (std.mem.eql(u8, path, "/healthz")) {
             const h = monitor.health(Io.Clock.real.now(monitor.io).toSeconds());
             return send(rw, if (h.ok) .ok else .service_unavailable, "application/json", try arena.print(

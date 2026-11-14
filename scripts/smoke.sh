@@ -61,6 +61,7 @@ grep -q 'cannot load the targets from missing.json: FileNotFound' log || fail "s
 start
 curl -sf "$URL/app.js" >/dev/null || fail "app.js"
 curl -sf "$URL/favicon.svg" | grep -q '<svg' || fail "favicon.svg"
+curl -sf "$URL/favicon-down.svg" | grep -q 'fill="#e5484d"' || fail "favicon-down.svg"
 curl -sf "$URL/healthz" | grep -q '"ok":true.*"read_only":false' || fail "not healthy at start"
 # DNS rebinding: a writable instance answers only to IP literals, localhost
 # and --allow-host names.
@@ -80,7 +81,7 @@ date +%s > idle.start
 (timeout 20 nc -d 127.0.0.1 $PORT >/dev/null 2>&1; date +%s > idle.end) &
 IDLE=$!
 
-# Wait for the first cycle (5 probes at 1 s per host + 1 s timeout).
+# Wait for the first cycle (its probes spread over what is left of the 5 s).
 i=0
 until curl -sf "$URL/api/state" | grep -q '"name":"nowhere"[^}]*"status":"down"'; do
     i=$((i + 1)); [ $i -lt 150 ] || fail "no completed cycle"; sleep 0.1
@@ -89,6 +90,12 @@ STATE=$(curl -sf "$URL/api/state")
 echo "$STATE" | grep -q '"name":"lo4"[^}]*"status":"up"' || fail "127.0.0.1 not up"
 echo "$STATE" | grep -q '"name":"lo6"[^}]*"status":"up"' || fail "::1 not up"
 echo "$STATE" | grep -q '"name":"lo4"[^}]*"jitter":\[[^]]*[0-9]' || fail "no jitter for 127.0.0.1"
+# The live view lists the probes of the running cycle as they come (empty
+# for a moment when a cycle starts).
+i=0
+until curl -sf "$URL/api/live" | grep -q '"cycle_s":5,"version":[0-9]*,"targets":\[[0-9,]*\],"probes":\[\[[0-9]*,[0-9]*,[0-9.]*\]'; do
+    i=$((i + 1)); [ $i -lt 60 ] || fail "no answered probe in /api/live"; sleep 0.1
+done
 
 # Polling with the ETag costs a body-less 304 until the state changes (a
 # cycle may complete between the two requests: retry).

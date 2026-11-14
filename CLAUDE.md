@@ -58,10 +58,22 @@ with the previous pin: a new default-on feature in a module arrives silently.
 - Tags: at most 8, lowercase, no spaces or commas; tag chips filter with AND; the search
   matches every word against name, host and tags. View state lives in the URL fragment
   (`#open=&tags=&q=&sort=&rev=&st=`).
-- A problem is **mean loss ≥ 1 % or mean jitter ≥ 10 ms** over the window. "Problems first"
+- A problem is **mean loss ≥ 1 % or mean jitter ≥ 10 ms** over the window (since 2026-11-14
+  jitter compares probes a fifth of the cycle apart, ~11.6 s; threshold kept, owner OK). "Problems first"
   tiers: DOWN → LOSS now → problem 1 h → problem 24 h → ACK → rest → PENDING → PAUSED.
-- Status pills (`ok · nok | up · down · loss · ack · pending · paused`) are always shown,
-  OR among themselves, AND with tags and search; counts are facets.
+- Status pills (`ok · nok | up · down · loss · ack · pending · paused`) are always rendered
+  (0 faint), OR among themselves, AND with tags and search; counts are facets.
+- The top bar floats (sticky) and is folded by default (owner, 2026-11-14): its one line
+  holds the logo (its ring counts down to the next cycle, grey when the server does not
+  answer), the `ok · nok` pills, "N of M shown" while filtered, Events and ☰; unfolded it
+  adds every pill, search, order and tags (the browser remembers it unfolded). A 3 px line
+  along its bottom is the cycle's probing window, coloured probe by probe until full; no
+  text in it (owner: text there is distracting).
+- Live (owner, 2026-11-14): the probes are spread over the cycle; a row's newest beat is
+  built from its probes so far, the latency figure follows each probe, a new cycle slides
+  the strip, a recorded beat "arrives", a status change flashes the row; the tab title
+  counts nok targets and the favicon takes the worst colour.
+- Events (global under the bar, per target in the detail) are hidden by default.
 - Editing happens in the row head (✎): name/host editor (`PATCH`, all or nothing) and a
   tag picker under its tags. Enter or click-outside saves only if changed, Esc cancels.
   No bottom sheet on phones (rejected).

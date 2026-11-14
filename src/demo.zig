@@ -2,7 +2,7 @@
 //!
 //! A fresh demo has no history, and a real one rarely shows anything worth
 //! looking at. So every full hour the monitor replaces everything older than
-//! the last hour of real probing with sample data: one scenario per target
+//! the last 12 hours of real probing with sample data: one scenario per target
 //! (`"demo"` in the target list), scaled to the target's real latency, so the
 //! sample past joins the live data. The page marks the sample part.
 //!
@@ -19,12 +19,14 @@ pub const Scenario = enum {
     steady,
     /// Congested uplink 18-22 UTC: latency and jitter climb, a little loss.
     evening_congestion,
-    /// A route change: a latency plateau for three hours, 18 to 15 hours ago.
+    /// A route change: a latency plateau for three hours, 10 to 7 hours
+    /// before the real data.
     route_change,
-    /// Bursts of partial loss all day, an 8-minute outage 6 hours ago.
+    /// Bursts of partial loss all day, an 8-minute outage 6 hours before the
+    /// real data.
     flapping,
     /// 20 minutes of warning signs (latency, jitter, loss), then 45 minutes
-    /// DOWN, recovered 3 hours ago.
+    /// DOWN, recovered 3 hours before the real data.
     outage,
     /// The same warning signs, then DOWN from 25 minutes before the real
     /// data on: for a target that never answers, so it stays DOWN live.
@@ -54,7 +56,7 @@ pub fn probes(s: Scenario, id: u32, t: i64, base_ms: f64, live_from: i64, out: [
             const rise = 1.2 * @max(b, 15) * x;
             break :blk .{ .base = b + rise, .spread = calm.spread + 0.3 * rise, .loss = 0.03 * x };
         } else calm,
-        .route_change => if (ago_h >= 15 and ago_h < 18) .{ .base = b + @max(0.45 * b, 5), .spread = calm.spread, .loss = calm.loss } else calm,
+        .route_change => if (ago_h >= 7 and ago_h < 10) .{ .base = b + @max(0.45 * b, 5), .spread = calm.spread, .loss = calm.loss } else calm,
         .flapping => if (ago_h >= 6 and ago_h < 6 + 8.0 / 60.0)
             .{ .base = b, .spread = calm.spread, .loss = 1 }
         else if (@mod(@divFloor(t, 60 * 37), 9) == 0)
@@ -124,12 +126,12 @@ test "scenarios happen where they are placed" {
     try testing.expectEqual(0, probes(.down, 1, live - 60, 30, live, &out));
     try testing.expectEqual(0, probes(.down, 1, live - 20 * 60, 30, live, &out));
     try testing.expect(probes(.down, 1, live - 20 * 3600, 30, live, &out) > 0);
-    // route change: a plateau 18 to 15 hours before.
+    // route change: a plateau 10 to 7 hours before.
     var plateau: u64 = 0;
     var normal: u64 = 0;
     for (0..30) |i| {
         const k: i64 = @intCast(i);
-        if (probes(.route_change, 1, live - 16 * 3600 - 60 * k, 30, live, &out) > 0) plateau += out[0];
+        if (probes(.route_change, 1, live - 8 * 3600 - 60 * k, 30, live, &out) > 0) plateau += out[0];
         if (probes(.route_change, 1, live - 3600 - 60 * k, 30, live, &out) > 0) normal += out[0];
     }
     try testing.expect(plateau > normal + 30 * 10_000); // +13.5 ms on a 30 ms base

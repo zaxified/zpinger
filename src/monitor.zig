@@ -3,8 +3,9 @@
 //!
 //! Every cycle sends a few echo requests to each active target through one
 //! zig-libs `icmp.Pinger` (so global pacing and in-flight limits apply across all
-//! targets) and stores one `Sample` per target: probes sent, replies received,
-//! the median round-trip time and the jitter.
+//! targets), spread over the whole cycle, and stores one `Sample` per target:
+//! probes sent, replies received, the median round-trip time and the jitter.
+//! While a cycle runs, its probes so far are the live view (`writeLive`).
 //!
 //! Locking: `mutex` guards `targets` and everything inside them. Probing runs
 //! without the lock, on a copy of the target list, so the web UI never waits
@@ -39,8 +40,9 @@ pub const Sample = struct {
     recv: u8 = 0,
     /// Median round-trip time of the replies, microseconds.
     rtt_us: u32 = 0,
-    /// Mean difference between consecutive replies' round-trip times,
-    /// microseconds; 0 with fewer than two replies.
+    /// Mean difference between consecutive replies' round-trip times
+    /// (probes a fifth of the cycle apart), microseconds; 0 with fewer than
+    /// two replies.
     jitter_us: u32 = 0,
 };
 
@@ -134,15 +136,20 @@ pub const Monitor = struct {
     /// history in memory only.
     history_path: ?[]const u8 = null,
     read_only: bool = false,
-    /// Public demo: every full hour, history older than the last hour of
+    /// Public demo: every full hour, history older than the last 12 hours of
     /// real probing is replaced with sample data (see demo.zig).
     demo: bool = false,
     /// Start (unix s) of the real data; older samples are sample data. 0 until
     /// the first fill.
     demo_from: i64 = 0,
-    /// The first cycle of this run, and the hour of the last fill.
+    /// Where the real data starts (the first cycle of this run, or the oldest
+    /// real sample of a demo target in the history file), and the hour of the
+    /// last fill.
     demo_since: i64 = 0,
     demo_hour: i64 = 0,
+    /// The oldest sample of a demo target loaded from the history file (which
+    /// keeps only real ones); 0 = none.
+    demo_loaded_from: i64 = 0,
     /// Bumped on every change the web page would show; with the cycle start
     /// it identifies one `stateJson` result (see `StateTag`).
     version: u64 = 0,
@@ -162,8 +169,29 @@ pub const Monitor = struct {
     started_at: std.atomic.Value(i64) = .init(0),
     cycle_done_at: std.atomic.Value(i64) = .init(0),
     probing_ok: std.atomic.Value(bool) = .init(true),
+    /// The cycle being probed, for the page's live view (`writeLive`): its
+    /// start (unix s, 0 = none yet), the targets it probes, and every probe
+    /// answered or given up on so far, in that order. Guarded by
+    /// `live_mutex`, not `mutex`: the probing loop records each answer as it
+    /// comes, and must not wait behind a viewer's state snapshot (a late
+    /// read would add the wait to the round-trip time). Room for a whole
+    /// cycle is taken once, so recording one never allocates.
+    live_mutex: Io.Mutex = .init,
+    live_cycle: i64 = 0,
+    live_ids: std.ArrayList(u32) = .empty,
+    live: std.ArrayList(LiveProbe) = .empty,
+
+    pub const LiveProbe = struct {
+        id: u32,
+        /// When the answer came or the probe timed out, ms after the cycle start.
+        at_ms: u32,
+        /// Round-trip time; null for a lost probe.
+        rtt_us: ?u32,
+    };
 
     pub fn deinit(m: *Monitor) void {
+        m.live.deinit(m.gpa);
+        m.live_ids.deinit(m.gpa);
         for (m.targets.items) |t| m.freeTarget(t);
         m.targets.deinit(m.gpa);
         if (m.snapshot) |snap| snap.release();
@@ -413,8 +441,14 @@ pub const Monitor = struct {
         // 2. Resolve the names whose answer expired (numeric addresses skip DNS).
         resolveAll(m.io, m.gpa, jobs, .{ .now = t, .stale_s = m.dns_stale_s });
 
-        // 3. Ping every resolved target in one paced round.
-        if (probe(m.gpa, jobs)) {
+        // 3. Ping every resolved target, the probes spread over what is left
+        //    of the cycle: all but the last probe's timeout and a second of
+        //    room, at least a second (a run started late in a cycle).
+        const now_ns = Io.Clock.real.now(m.io).toNanoseconds();
+        const end_ns = @as(i96, t + m.cycle_s) * std.time.ns_per_s - probe_timeout_ns - std.time.ns_per_s;
+        const window_ns: u64 = @intCast(@max(end_ns - now_ns, std.time.ns_per_s));
+        m.startLive(t, jobs);
+        if (probe(m, jobs, t, window_ns)) {
             m.probing_ok.store(true, .monotonic);
         } else |err| {
             log.err("probing failed: {t}", .{err});
@@ -434,6 +468,55 @@ pub const Monitor = struct {
         if (m.demo) m.demoFillLocked(t);
         m.version += 1;
         m.saveHistoryLocked();
+    }
+
+    /// A new cycle `t` for the live view, probing the `jobs` that have an
+    /// address. Without the room for its probes (out of memory) the live
+    /// view stays empty; probing goes on.
+    fn startLive(m: *Monitor, t: i64, jobs: []const Job) void {
+        m.live_mutex.lockUncancelable(m.io);
+        defer m.live_mutex.unlock(m.io);
+        m.live_cycle = t;
+        m.live.clearRetainingCapacity();
+        m.live_ids.clearRetainingCapacity();
+        m.live.ensureTotalCapacity(m.gpa, max_targets * probes_per_cycle) catch return;
+        m.live_ids.ensureTotalCapacity(m.gpa, max_targets) catch return;
+        for (jobs) |job| if (job.addr != null and m.live_ids.items.len < max_targets)
+            m.live_ids.appendAssumeCapacity(job.id);
+    }
+
+    /// One probe of cycle `t` answered (`rtt_us`) or lost (null).
+    fn noteLive(m: *Monitor, t: i64, id: u32, rtt_us: ?u32) void {
+        const now_ms = Io.Clock.real.now(m.io).toMilliseconds();
+        m.live_mutex.lockUncancelable(m.io);
+        defer m.live_mutex.unlock(m.io);
+        if (m.live_cycle != t or m.live.items.len == m.live.capacity) return;
+        const at_ms = std.math.clamp(now_ms - t * std.time.ms_per_s, 0, @min(m.cycle_s * std.time.ms_per_s, std.math.maxInt(u32)));
+        m.live.appendAssumeCapacity(.{ .id = id, .at_ms = @intCast(at_ms), .rtt_us = rtt_us });
+    }
+
+    /// GET /api/live: the cycle being probed, the targets it probes and its
+    /// probes so far (see doc/api.md). `version` is the state's: a page whose
+    /// state has another version, or an older `end` than `cycle`, loads the
+    /// state again.
+    pub fn writeLive(m: *Monitor, w: *Io.Writer) Io.Writer.Error!void {
+        const now_ms = Io.Clock.real.now(m.io).toMilliseconds();
+        const version = blk: {
+            m.mutex.lockUncancelable(m.io);
+            defer m.mutex.unlock(m.io);
+            break :blk m.version;
+        };
+        m.live_mutex.lockUncancelable(m.io);
+        defer m.live_mutex.unlock(m.io);
+        try w.print("{{\"now\":{d},\"cycle\":{d},\"cycle_s\":{d},\"version\":{d},\"targets\":[", .{ now_ms, m.live_cycle, m.cycle_s, version });
+        for (m.live_ids.items, 0..) |id, i| try w.print("{s}{d}", .{ if (i == 0) "" else ",", id });
+        try w.writeAll("],\"probes\":[");
+        for (m.live.items, 0..) |p, i| {
+            try w.print("{s}[{d},{d},", .{ if (i == 0) "" else ",", p.id, p.at_ms });
+            if (p.rtt_us) |v| try writeMs(w, v) else try w.writeAll("null");
+            try w.writeByte(']');
+        }
+        try w.writeAll("]}");
     }
 
     fn recordLocked(m: *Monitor, target: *Target, t: i64, job: *Job) void {
@@ -494,16 +577,18 @@ pub const Monitor = struct {
     }
 
     /// Once per hour (and after the first cycle of a run): everything older
-    /// than the last hour of real data, or than this run, becomes sample data.
+    /// than the newer half of the history (12 hours at one-minute cycles),
+    /// or than the real data, becomes sample data. The real data starts with
+    /// this run, or earlier with what the history file kept of the last one.
     fn demoFillLocked(m: *Monitor, t: i64) void {
-        if (m.demo_since == 0) m.demo_since = t;
+        if (m.demo_since == 0) m.demo_since = if (m.demo_loaded_from != 0) @min(t, m.demo_loaded_from) else t;
         const hour = t - @mod(t, 3600);
         if (hour == m.demo_hour) return;
         m.demo_hour = hour;
         // On a cycle boundary (`t` and `demo_since` are), so the real
         // samples are found below whatever `cycle_s` is.
-        const hour_ago = hour - 3600 + @mod(-(hour - 3600), m.cycle_s);
-        const live_from = @max(hour_ago, m.demo_since);
+        const from = hour - @divTrunc(history_len * m.cycle_s, 2);
+        const live_from = @max(from + @mod(-from, m.cycle_s), m.demo_since);
         m.demo_from = live_from;
         const oldest = t - (history_len - 1) * m.cycle_s;
         for (m.targets.items) |target| {
@@ -643,6 +728,8 @@ pub const Monitor = struct {
                 if (sample.sent > probes_per_cycle or sample.recv > sample.sent) continue;
                 t.history[m.slot(sample.t)] = sample;
                 if (sample.t > t.last.t) t.last = sample;
+                if (t.scenario != null and (m.demo_loaded_from == 0 or sample.t < m.demo_loaded_from))
+                    m.demo_loaded_from = sample.t;
             }
         }
     }
@@ -783,8 +870,8 @@ pub const Monitor = struct {
     /// `null` where there is no sample.
     fn writeStateLocked(m: *Monitor, w: *Io.Writer, newest: i64) Io.Writer.Error!void {
         try w.print(
-            "{{\"read_only\":{},\"demo_from\":{d},\"cycle_s\":{d},\"probes\":{d},\"ack_clear_after\":{d},\"end\":{d},\"targets\":[",
-            .{ m.read_only, m.demo_from, m.cycle_s, probes_per_cycle, ack_clear_after, newest },
+            "{{\"read_only\":{},\"version\":{d},\"demo_from\":{d},\"cycle_s\":{d},\"probes\":{d},\"ack_clear_after\":{d},\"end\":{d},\"targets\":[",
+            .{ m.read_only, m.version, m.demo_from, m.cycle_s, probes_per_cycle, ack_clear_after, newest },
         );
         for (m.targets.items, 0..) |t, i| {
             try w.print(
@@ -1109,19 +1196,32 @@ const Job = struct {
     sent: u8 = 0,
 };
 
-/// Ping every job that has an address, `probes_per_cycle` times, in one round.
-fn probe(gpa: std.mem.Allocator, jobs: []Job) !void {
-    var pinger = try icmp.Pinger.init(gpa, .{
+/// How long a probe waits for its reply.
+const probe_timeout_ns = std.time.ns_per_s;
+
+/// The probe schedule for a window of `window_ns`: every target gets
+/// `probes_per_cycle` probes a fifth of the window apart, starting at a
+/// random point of the first fifth, so the probes of all targets lie spread
+/// over the whole window in no fixed order (no burst at the start of the
+/// cycle, and a short outage anywhere in it is seen). At least 20 ms between
+/// any two packets, as before.
+fn spreadConfig(window_ns: u64) icmp.Config {
+    const period = @max(window_ns / probes_per_cycle, 100 * std.time.ns_per_ms);
+    return .{
         .mode = .count,
         .count = probes_per_cycle,
-        // Spread the probes: 20 ms between any two packets, 1 s between
-        // probes to the same host, 1 s to answer, and a random start offset
-        // within 500 ms so consecutive cycles do not line up.
         .interval_ns = 20 * std.time.ns_per_ms,
-        .perhost_interval_ns = std.time.ns_per_s,
-        .timeout_ns = std.time.ns_per_s,
-        .jitter_ns = 500 * std.time.ns_per_ms,
-    });
+        .perhost_interval_ns = period,
+        .timeout_ns = probe_timeout_ns,
+        .jitter_ns = period,
+    };
+}
+
+/// Ping every job that has an address, `probes_per_cycle` times, spread over
+/// `window_ns` (see `spreadConfig`). Each answer or timeout also goes to the
+/// monitor's live view of cycle `t` as it comes.
+fn probe(m: *Monitor, jobs: []Job, t: i64, window_ns: u64) !void {
+    var pinger = try icmp.Pinger.init(m.gpa, spreadConfig(window_ns));
     defer pinger.deinit();
 
     // Pinger target ids are dense indexes; map them back to jobs.
@@ -1136,19 +1236,27 @@ fn probe(gpa: std.mem.Allocator, jobs: []Job) !void {
     if (n == 0) return;
 
     const Collect = struct {
+        map: *[max_targets]*Job,
+        m: *Monitor,
+        t: i64,
+
         fn onResult(ctx: ?*anyopaque, id: icmp.TargetId, _: u16, outcome: icmp.Outcome) void {
-            const map: *[max_targets]*Job = @ptrCast(@alignCast(ctx.?));
-            const job = map[id];
-            switch (outcome) {
-                .reply => |r| if (job.replies < probes_per_cycle) {
-                    job.rtts[job.replies] = @intCast(@min(r.rtt_ns / std.time.ns_per_us, std.math.maxInt(u32)));
-                    job.replies += 1;
-                },
-                else => {},
-            }
+            const c: *@This() = @ptrCast(@alignCast(ctx.?));
+            const job = c.map[id];
+            const rtt_us: ?u32 = switch (outcome) {
+                .reply => |r| @intCast(@min(r.rtt_ns / std.time.ns_per_us, std.math.maxInt(u32))),
+                .timeout, .send_error => null,
+                .duplicate => return,
+            };
+            if (rtt_us) |v| if (job.replies < probes_per_cycle) {
+                job.rtts[job.replies] = v;
+                job.replies += 1;
+            };
+            c.m.noteLive(c.t, job.id, rtt_us);
         }
     };
-    pinger.setResultCallback(&index, Collect.onResult);
+    var collect: Collect = .{ .map = &index, .m = m, .t = t };
+    pinger.setResultCallback(&collect, Collect.onResult);
     try pinger.run();
     for (index[0..n], 0..) |job, id| job.sent = @intCast(pinger.stats(@intCast(id)).sent);
 }
@@ -1326,7 +1434,7 @@ test "jitter is the mean step between consecutive replies" {
     try testing.expectEqual(1500, jitter(&.{ 1000, 3000, 2000 })); // (2000 + 1000) / 2
 }
 
-test "demo: sample data before the real hour, real data kept" {
+test "demo: sample data before the real 12 hours, real data kept" {
     var m = testMonitor();
     defer m.deinit();
     m.demo = true;
@@ -1344,26 +1452,50 @@ test "demo: sample data before the real hour, real data kept" {
     try testing.expectEqual(0, t.history[m.slot(hour + 600 - 3 * 3600 - 600)].recv);
     const calm = t.history[m.slot(hour + 600 - 3600)];
     try testing.expect(calm.recv > 0 and calm.rtt_us >= 3000 and calm.rtt_us < 10_000);
-    // Later fills keep the last full hour of real data, and this run's.
-    for (11..70) |i| fakeCycle(&m, id, hour + 60 * @as(i64, @intCast(i)), 4);
-    m.demoFillLocked(hour + 3600 + 540);
-    try testing.expectEqual(hour + 600, m.demo_from); // max(hour, first cycle)
-    try testing.expectEqual(4, t.history[m.slot(hour + 660)].recv); // real
-    for (70..2 * 60 + 10) |i| fakeCycle(&m, id, hour + 60 * @as(i64, @intCast(i)), 4);
+    // Later fills keep the last 12 full hours of real data, and this run's.
+    for (11..2 * 60 + 10) |i| fakeCycle(&m, id, hour + 60 * @as(i64, @intCast(i)), 4);
     m.demoFillLocked(hour + 2 * 3600 + 540);
+    try testing.expectEqual(hour + 600, m.demo_from); // max(12 hours ago, first cycle)
+    try testing.expectEqual(4, t.history[m.slot(hour + 660)].recv); // real
+    for (2 * 60 + 10..13 * 60 + 10) |i| fakeCycle(&m, id, hour + 60 * @as(i64, @intCast(i)), 4);
+    m.demoFillLocked(hour + 13 * 3600 + 540);
     try testing.expectEqual(hour + 3600, m.demo_from);
     try testing.expectEqual(4, t.history[m.slot(hour + 3600)].recv); // real
+    try testing.expect(t.history[m.slot(hour + 3540)].recv != 4); // sample
     // A cycle that does not divide the hour still finds the real samples.
     m.cycle_s = 7;
     const base: i64 = 7 * 242_858_000; // cycle starts are multiples of cycle_s
     m.demo_since = base;
     m.demo_hour = 0;
-    const now = base + 7 * 1000; // two hour boundaries later
-    for (0..1001) |i| fakeCycle(&m, id, base + 7 * @as(i64, @intCast(i)), 5);
+    const now = base + 7 * 2000; // half the history (5040 s) after the real data starts
+    for (0..2001) |i| fakeCycle(&m, id, base + 7 * @as(i64, @intCast(i)), 5);
     m.demoFillLocked(now);
+    try testing.expect(m.demo_from > base); // the window, not the start of the run
     try testing.expectEqual(0, @mod(m.demo_from, 7));
-    const calm7 = t.history[m.slot(m.demo_from - 7 * 300)];
+    const calm7 = t.history[m.slot(m.demo_from - 7 * 30)];
     try testing.expect(calm7.recv > 0 and calm7.rtt_us >= 3000 and calm7.rtt_us < 10_000);
+}
+
+test "demo: real samples from the history file stay real" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var m = testMonitor();
+    defer m.deinit();
+    m.demo = true;
+    const id = try m.add("a", "192.0.2.1", &.{});
+    m.targets.items[0].scenario = .steady;
+    const now = Io.Clock.real.now(testing.io).toSeconds();
+    const t0 = now - @mod(now, 60);
+    var buf: [256]u8 = undefined;
+    const old = t0 - 3 * 3600; // the last run's, three hours ago
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "history.json", .data = try std.mem.print(&buf, "{{\"cycle_s\":60,\"targets\":[{{\"id\":{d},\"samples\":[[{d},5,5,900,70],[{d},5,4,900,70]]}}]}}", .{ id, old, old + 60 }) });
+    var file_buf: [256]u8 = undefined;
+    m.history_path = try std.mem.print(&file_buf, ".zig-cache/tmp/{s}/history.json", .{tmp.sub_path});
+    try m.loadHistory();
+    fakeCycle(&m, id, t0, 5);
+    m.demoFillLocked(t0);
+    try testing.expectEqual(old, m.demo_from);
+    try testing.expectEqual(4, m.targets.items[0].history[m.slot(old + 60)].recv);
 }
 
 test "tags: validated, normalized, saved, loaded and served" {

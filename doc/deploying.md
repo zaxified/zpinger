@@ -120,9 +120,11 @@ CrowdSec needs to read those lines and ban what they show, in
 
 A new demo has no history, and a healthy network has nothing to show. With
 `--demo`, after the first cycle and then at every full hour, everything older
-than the last full hour of real probing (or than the start of the daemon,
-whichever is later) is replaced with sample data; the page shades it and
-marks it "sample data", tooltips included. Only targets with a `"demo"`
+than the last 12 full hours of real probing (or than the start of the real
+data, whichever is later) is replaced with sample data; the page shades it
+and marks it "sample data", tooltips included. The real data starts with the
+daemon, or earlier with what the history file (`--history`) kept from the
+last run, so a restart does not throw the live half away. Only targets with a `"demo"`
 scenario get it:
 
 ```json
@@ -133,17 +135,18 @@ scenario get it:
 |---|---|
 | `steady` | nothing: small noise, a rare spike |
 | `evening_congestion` | a congested uplink 18-22 UTC: latency and jitter climb, a little loss |
-| `route_change` | a latency plateau for three hours, 18 to 15 hours ago |
-| `flapping` | bursts of partial loss all day, an 8-minute outage 6 hours ago |
-| `outage` | 20 minutes of rising latency, jitter and loss, then 45 minutes DOWN, recovered 3 hours ago |
-| `down` | the same warning signs, then DOWN from 25 minutes before the live hour: for a target that never answers |
+| `route_change` | a latency plateau for three hours, 10 to 7 hours before the live data |
+| `flapping` | bursts of partial loss all day, an 8-minute outage 6 hours before the live data |
+| `outage` | 20 minutes of rising latency, jitter and loss, then 45 minutes DOWN, recovered 3 hours before the live data |
+| `down` | the same warning signs, then DOWN from 25 minutes before the live data on: for a target that never answers |
 | `bufferbloat` | a nightly backup 01:00-02:30 UTC: a sawtooth of queueing delay |
 | `long_haul` | a distant host: more jitter, busier 10-14 UTC |
 
 The sample data is scaled to the target's real median latency, so it joins
-the live hour. Time-of-day scenarios stay where they are; the others are
-placed relative to the live hour, so they never fall into it, and move on
-with it every hour. The sample data is never written to the history file. Live probing stays real, so choose
+the live data. Time-of-day scenarios stay where they are (and show only when
+their hours fall into the sample half); the others are placed relative to the
+start of the live data, so they never fall into it, and move on with it every
+hour. The sample data is never written to the history file. Live probing stays real, so choose
 targets that answer. The package ships a list of public IPv4 and IPv6
 targets with one scenario each, `/usr/share/zpinger/demo-targets.json`
 (`ZPINGER_TARGETS` can point at it directly); its DOWN target is in

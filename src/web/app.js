@@ -2,9 +2,17 @@
 // build step; every user-supplied string goes through textContent.
 "use strict";
 
-const REFRESH_MS = 15000;
+// The page polls /api/live (the cycle being probed, a few hundred bytes)
+// every 2 s, and loads the state only when that says it changed; a slow
+// fallback catches a server that probes nothing (every target paused).
+const LIVE_MS = 2000;
+const STATE_FALLBACK_MS = 60000;
 const BEAT_PX = 9; // beat width + gap, see .beat in style.css
 let state = null;
+let live = null; // the last /api/live answer
+let skew = 0; // server clock minus this browser's, ms
+let online = true;
+let lastHeard = Date.now(); // the last answer from the server
 
 // What the list shows, kept in the URL fragment so a filtered view can be
 // bookmarked or sent: #open=3,5&tags=dns,ipv6&q=google&sort=loss&rev=1.
@@ -148,22 +156,84 @@ function summarize(t, cycles = t.rtt.length) {
 
 let etag = null;
 
+// Loads may overlap (a poll, a change, the fallback); an answer older than
+// one already shown is dropped.
+let loadSeq = 0, shownSeq = 0;
 async function load() {
+  const seq = ++loadSeq;
   try {
     // "no-cache": the browser revalidates with If-None-Match, and the server
     // answers 304 until the next cycle; nothing new means nothing to redraw.
     const res = await fetch("api/state", { cache: "no-cache" });
     if (!res.ok) throw new Error(res.statusText);
     const tag = res.headers.get("etag");
+    if (seq < shownSeq) return;
     if (tag === null || tag !== etag) {
-      state = await res.json();
+      const next = await res.json();
+      if (seq < shownSeq) return;
+      shownSeq = seq;
+      const before = state;
+      state = next;
       etag = tag;
-      render();
+      render(before && changesSince(before, state));
     }
-    $("#updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    heard();
   } catch (err) {
-    $("#updated").textContent = `Cannot reach the server (${err.message}), retrying…`;
+    lost(err);
   }
+}
+
+let livePolling = false;
+async function pollLive() {
+  if (livePolling) return;
+  livePolling = true;
+  try {
+    const res = await fetch("api/live", { cache: "no-store" });
+    if (!res.ok) throw new Error(res.statusText);
+    live = await res.json();
+    skew = live.now - Date.now();
+    heard();
+    // A recorded cycle, a changed target, a new cycle: the state has it.
+    // (A new cycle by the clock too: with every target paused no cycle runs.)
+    const cycle = Math.floor(serverNow() / 1000 / state?.cycle_s) * state?.cycle_s;
+    if (!state || live.version !== state.version || live.cycle > state.end || cycle > state.end) await load();
+    else updateLive();
+  } catch (err) {
+    lost(err);
+  } finally {
+    livePolling = false;
+  }
+}
+
+function heard() {
+  lastHeard = Date.now();
+  if (!online) {
+    online = true;
+    tick();
+  }
+  $("#updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+}
+function lost(err) {
+  online = false;
+  tick();
+  $("#updated").textContent = `Cannot reach the server (${err.message}), retrying…`;
+}
+
+// What a new state changed, for the animations: the series moved on by a
+// cycle (`shift`), a target's newest cycle was recorded (`arrive`), a
+// target's status changed (`flash`, to the new status's colour).
+function changesSince(before, now) {
+  const old = new Map(before.targets.map((t) => [t.id, t]));
+  const arrive = new Set(), flash = new Map();
+  const shift = now.end !== before.end;
+  for (const t of now.targets) {
+    const o = old.get(t.id);
+    if (!o) continue;
+    const last = t.loss.length - 1;
+    if (t.loss[last] !== null && (shift || o.loss[last] === null)) arrive.add(t.id);
+    if (statusOf(o) !== statusOf(t) && t.status !== "pending") flash.set(t.id, STATUS[statusOf(t)][1]);
+  }
+  return { shift, arrive, flash };
 }
 
 // A read-only demo shows every control, so it looks like the real thing;
@@ -185,17 +255,21 @@ async function call(method, path, body) {
 
 // ----- rendering ---------------------------------------------------------------
 
-function render() {
+// `anim`: what changed since the last state (changesSince), when a new state
+// came; any other redraw (a filter, an editor) animates nothing.
+function render(anim) {
   $("#mode").hidden = !state.read_only;
 
   const hour = 3600 / state.cycle_s;
   const stats = new Map(state.targets.map((t) => [t.id, { day: summarize(t), hour: summarize(t, hour) }]));
+  renderTab(stats);
   // The pills count what the tags and the search leave, like the facets of
   // a shop's search: with a tag selected they show that tag's health.
   const base = state.targets.filter(matches);
   renderPills(base, stats);
   const shown = sortTargets(base.filter((t) => inPills(t, stats.get(t.id))), stats);
   renderToolbar(shown.length);
+  renderFeed(shown);
 
   // A re-render gives the focus back to the control of a row that had it
   // (an editor's field with its caret, an edit button), marked data-focus.
@@ -210,7 +284,7 @@ function render() {
   const y = window.scrollY;
   const list = $("#targets");
   const expand = [];
-  list.replaceChildren(...shown.map((t) => renderTarget(t, stats.get(t.id).day, expand)));
+  list.replaceChildren(...shown.map((t) => renderTarget(t, stats.get(t.id).day, expand, anim)));
   if (state.targets.length === 0) list.append(el("p", "empty", "No targets yet."));
   else if (shown.length === 0) {
     const p = el("p", "empty", "No target matches the filter. ");
@@ -223,8 +297,264 @@ function render() {
   for (const show of expand) show();
   renderAddTags();
   placePicker();
+  renderLine();
   if (refocus) focusRow(refocus.id, refocus.key, refocus.caret);
   if (window.scrollY !== y) window.scrollTo(0, y);
+}
+
+// ----- live: the cycle being probed ----------------------------------------------
+
+// The probes of target `t` in the cycle being probed, in order, [id, ms, rtt].
+const liveProbes = (t) => (live && state && live.cycle === state.end ? live.probes.filter((p) => p[0] === t.id) : []);
+
+// The newest cycle is not recorded yet, and this one is probing it: its
+// beat is built from the probes so far.
+// A target added (or moved, or resumed) after the cycle started is not in
+// it: its first beat waits for the next cycle.
+const showsLive = (t) =>
+  !t.paused && t.loss[t.loss.length - 1] === null && live !== null && live.cycle === state.end && live.targets.includes(t.id);
+
+function liveBeat(t) {
+  const b = el("span", "beat live");
+  for (let i = 0; i < state.probes; i++) b.append(el("i"));
+  fillLive(b, t, false);
+  return b;
+}
+
+function fillLive(b, t, fresh) {
+  const probes = liveProbes(t);
+  const segs = b.children;
+  probes.slice(0, segs.length).forEach((p, i) => {
+    const cls = p[2] === null ? "lost" : "ok";
+    // A segment just filled flashes once.
+    if (segs[i].className !== cls) segs[i].className = fresh ? `${cls} fresh` : cls;
+  });
+  const answered = probes.filter((p) => p[2] !== null).length;
+  b.title = `${time(state.end)} · this cycle so far: ${probes.length} of ${state.probes} probes, ${answered} answered`;
+}
+
+// The newest round-trip time: this cycle's last answer, else the last cycle's.
+function latencyOf(t, s) {
+  if (t.paused) return null;
+  const answered = liveProbes(t).filter((p) => p[2] !== null);
+  return answered.length ? answered[answered.length - 1][2] : s.last;
+}
+
+// A /api/live answer that changed nothing in the state: fill the live
+// beats and the latency figures in place, no redraw.
+function updateLive() {
+  for (const row of document.querySelectorAll("#targets .target")) {
+    const t = state.targets.find((x) => x.id === Number(row.dataset.target));
+    if (!t) continue;
+    const beats = $(".beats", row);
+    const b = $(".beat.live", beats);
+    if (showsLive(t) !== !!b) renderBeats(beats, t, null);
+    else if (b) fillLive(b, t, true);
+    const lat = $(".latency", row);
+    const text = ms(latencyOf(t, { last: summarize(t, 1).last }));
+    if (lat.textContent !== text) {
+      lat.textContent = text;
+      lat.classList.remove("fresh");
+      void lat.offsetWidth; // restart the animation
+      lat.classList.add("fresh");
+    }
+  }
+  renderLine();
+}
+
+// The line along the bottom of the bar: the probing window of this cycle,
+// left to right; every probe, as it comes, colours the stretch since the one
+// before it (green answered, red lost), so by the end of the window the line
+// is full. A faint stretch runs from the last probe to now.
+let lineStops = "", lineLast = 0;
+function renderLine() {
+  if (!state || !live || live.cycle !== state.end) {
+    lineStops = "";
+    lineLast = 0;
+  } else {
+    // The last probe goes out 2 s before the next cycle (doc/how-it-works.md).
+    const span = state.cycle_s * 1000 - 2000;
+    const pct = (ms) => Math.min(100, (100 * ms) / span).toFixed(2);
+    let prev = "0", stops = [];
+    for (const [, at, rtt] of live.probes) {
+      const x = pct(at);
+      stops.push(`${rtt === null ? "var(--down)" : "var(--up)"} ${prev}% ${x}%`);
+      prev = x;
+    }
+    lineStops = stops.join(", ");
+    lineLast = Number(prev);
+  }
+  tickLine();
+}
+
+function tickLine() {
+  const line = $("#line");
+  if (!state) return;
+  const now = serverNow();
+  const span = state.cycle_s * 1000 - 2000;
+  const cycleStart = Math.floor(now / (state.cycle_s * 1000)) * state.cycle_s * 1000;
+  const head = Math.max(lineLast, Math.min(100, (100 * (now - cycleStart)) / span));
+  const faint = "color-mix(in srgb, var(--accent) 35%, transparent)";
+  const parts = [lineStops, `${faint} ${lineLast}% ${head.toFixed(1)}%`, `transparent ${head.toFixed(1)}% 100%`].filter(Boolean);
+  const bg = online ? `linear-gradient(90deg, ${parts.join(", ")})` : "";
+  if (bg !== lineBg) line.style.background = lineBg = bg;
+  line.classList.toggle("offline", !online);
+}
+
+let lineBg = null;
+const serverNow = () => Date.now() + skew;
+
+// The logo's ring counts down to the next cycle, like a clock's hand; grey
+// while the server does not answer.
+function tick() {
+  if (!state) return;
+  const cycle = state.cycle_s * 1000;
+  const into = serverNow() % cycle;
+  const left = 100 * (1 - into / cycle);
+  const ring = $("#ring");
+  ring.style.strokeDasharray = `${left.toFixed(2)} 100`;
+  ring.style.strokeDashoffset = `${(-(100 - left)).toFixed(2)}`;
+  const logo = $("#logo");
+  logo.classList.toggle("offline", !online);
+  const ago = Math.round((Date.now() - lastHeard) / 1000);
+  const label = online
+    ? `Probing: next cycle in ${Math.ceil((cycle - into) / 1000)} s, updated ${ago} s ago`
+    : `Cannot reach the server since ${ago} s; retrying`;
+  if (logo.title !== label) {
+    logo.title = label;
+    logo.setAttribute("aria-label", label);
+  }
+  tickLine();
+}
+
+// The tab's title and icon: how many targets need attention, in the colour
+// of the worst status, so a tab in the background still tells.
+let favColor = null;
+function renderTab(stats) {
+  let nok = 0;
+  for (const t of state.targets) if (healthOf(t, stats.get(t.id)) === "nok") nok++;
+  const st = state.targets.map(statusOf);
+  const color = st.includes("down") ? "down" : st.includes("degraded") || nok ? "warn" : st.includes("up") ? "up" : "idle";
+  document.title = nok ? `(${nok}) zpinger` : "zpinger";
+  if (color === favColor) return;
+  favColor = color;
+  // Served in each colour (the content security policy allows no data: icon).
+  $("#favicon").href = `favicon-${color}.svg`;
+}
+
+// ----- events: problems of the last 24 hours ----------------------------------------
+//
+// Read from the series the page already has. An event is a run of cycles
+// that lost probes; up to 5 clean cycles inside it do not end it, so an
+// outage with its warning signs (cycles that lose some probes, then all) is
+// one event, not a dozen. It is a DOWN event when some of its cycles lost
+// every probe. One cycle that lost one probe is noise, not an event: it needs
+// 2 lossy cycles, or 40 % in one. Cycles without data neither end nor extend
+// an event.
+
+const LOSS_GAP = 5;
+
+function episodes(t) {
+  const n = t.loss.length;
+  const at = (i) => state.end - (n - 1 - i) * state.cycle_s;
+  let newest = -1;
+  for (let i = n - 1; i >= 0 && newest < 0; i--) if (t.loss[i] !== null) newest = i;
+  const out = [];
+  let cur = null, clean = 0;
+  const close = () => {
+    if (cur && (cur.down > 0 || cur.cycles >= 2 || cur.peak >= 40)) {
+      cur.kind = cur.down > 0 ? "down" : "loss";
+      cur.from = at(cur.first);
+      cur.to = at(cur.last) + state.cycle_s;
+      // Still going: it reaches the newest data, and that is from now (not
+      // from before a pause, or before the daemon stopped).
+      cur.ongoing = cur.last === newest && !t.paused && at(newest) >= state.end - 2 * state.cycle_s;
+      cur.sample = isSample(t, cur.from);
+      out.push(cur);
+    }
+    cur = null;
+  };
+  for (let i = 0; i < n; i++) {
+    const v = t.loss[i];
+    if (v === null) continue;
+    if (v === 0) {
+      if (cur && ++clean > LOSS_GAP) close();
+      continue;
+    }
+    clean = 0;
+    if (!cur) cur = { t, first: i, cycles: 0, down: 0, peak: 0 };
+    cur.last = i;
+    cur.cycles++;
+    if (v === 100) cur.down++;
+    cur.peak = Math.max(cur.peak, v);
+  }
+  close();
+  return out;
+}
+
+const minutes = (s) => {
+  const m = Math.max(1, Math.round(s / 60));
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
+};
+
+function eventLine(e, withName) {
+  const li = el("li", e.sample ? "sample" : null);
+  li.style.setProperty("--c", e.kind === "down" ? "var(--down)" : "var(--warn)");
+  const when = e.ongoing ? `since ${time(e.from)}` : `${time(e.from)}–${time(e.to)}`;
+  const down = minutes(e.down * state.cycle_s), span = minutes(e.to - e.from);
+  const what = e.kind === "loss" ? `lost up to ${e.peak} % of probes over ${span}`
+    : e.down === e.cycles ? `DOWN for ${down}` : `DOWN for ${down}, losing probes over ${span}`;
+  const text = el("span", "what");
+  if (withName) {
+    const name = el("button", "link", e.t.name);
+    name.type = "button";
+    name.title = "Show this target";
+    name.addEventListener("click", () => showTarget(e.t.id));
+    text.append(name, " ");
+  }
+  text.append(what);
+  if (e.sample) text.append(el("span", "tag", "sample data"));
+  li.append(el("time", null, when), el("span", "dot"), text);
+  return li;
+}
+
+// The list of `events`, newest first (ongoing ones on top), or why it is empty.
+function fillFeed(events, withName, empty) {
+  events.sort((a, b) => b.ongoing - a.ongoing || b.to - a.to);
+  const list = el("ol");
+  for (const e of events) list.append(eventLine(e, withName));
+  if (!events.length) list.append(el("li", "none", empty));
+  return list;
+}
+
+// The global feed: the events of the targets the list shows.
+let feedOpen = false;
+function renderFeed(shown) {
+  const box = $("#feed");
+  box.hidden = !feedOpen;
+  $("#events").setAttribute("aria-expanded", String(feedOpen));
+  if (!feedOpen) return;
+  const head = el("div", "feed-head");
+  head.append(el("b", null, "Events"), el("span", "note", filtered() ? `last 24 hours, the ${shown.length} targets shown` : "last 24 hours"));
+  head.title = "Runs of cycles that lost probes (DOWN: some lost every probe); a single cycle that lost one probe is left out";
+  box.replaceChildren(head, fillFeed(shown.flatMap(episodes), true, "Nothing went wrong."));
+}
+
+function showTarget(id) {
+  view.open.add(id);
+  saveView();
+  render();
+  $(`[data-target="${id}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+// The per-target feed in a row's detail; open ones are remembered.
+const rowFeeds = new Set();
+function renderRowFeed(box, t) {
+  box.hidden = !rowFeeds.has(t.id);
+  if (box.hidden) return box.replaceChildren();
+  const head = el("div", "feed-head");
+  head.append(el("b", null, "Events"), el("span", "note", "last 24 hours"));
+  box.replaceChildren(head, fillFeed(episodes(t), false, "Nothing went wrong."));
 }
 
 function focusRow(id, key, caret) {
@@ -255,17 +585,24 @@ function renderPills(base, stats) {
     const h = healthOf(t, stats.get(t.id));
     if (h) counts[h]++;
   }
-  const bar = $("#summary");
+  // Every pill in the unfolded bar; the health ones also in its first line,
+  // shown while it is folded.
+  const bar = $("#summary"), health = $("#health");
   bar.replaceChildren();
+  health.replaceChildren();
   for (const [key, [label, color, hint]] of Object.entries(PILLS)) {
     const on = view.st.has(key);
-    const pill = el("button", `pill${counts[key] ? "" : " zero"}${HEALTH.includes(key) ? " health" : ""}`, `${counts[key]} ${label}`);
-    pill.type = "button";
-    pill.style.setProperty("--c", color);
-    pill.setAttribute("aria-pressed", String(on));
-    pill.title = `${hint}. Click to ${on ? "stop showing only these" : "show only these"}; several pills show any of them.`;
-    pill.addEventListener("click", () => setView(() => (on ? view.st.delete(key) : view.st.add(key))));
-    bar.append(pill);
+    const pill = () => {
+      const p = el("button", `pill${counts[key] ? "" : " zero"}${HEALTH.includes(key) ? " health" : ""}`, `${counts[key]} ${label}`);
+      p.type = "button";
+      p.style.setProperty("--c", color);
+      p.setAttribute("aria-pressed", String(on));
+      p.title = `${hint}. Click to ${on ? "stop showing only these" : "show only these"}; several pills show any of them.`;
+      p.addEventListener("click", () => setView(() => (on ? view.st.delete(key) : view.st.add(key))));
+      return p;
+    };
+    bar.append(pill());
+    if (HEALTH.includes(key)) health.append(pill());
     if (key === HEALTH[HEALTH.length - 1]) bar.append(el("span", "pill-sep"));
   }
 }
@@ -370,9 +707,11 @@ function renderToolbar(count) {
   order.title = `Order: ${view.rev ? back : fwd} (click: ${view.rev ? fwd : back})`;
   order.setAttribute("aria-label", order.title);
 
-  const note = $("#shown");
-  note.replaceChildren();
-  if (filtered()) {
+  // In the unfolded bar, and in its first line while folded (the filters
+  // are out of sight then, and the list is shorter than it seems).
+  for (const note of [$("#shown"), $("#shown-mini")]) {
+    note.replaceChildren();
+    if (!filtered()) continue;
     note.append(`${count} of ${state.targets.length} shown `);
     const clear = el("button", "link", "clear");
     clear.type = "button";
@@ -383,10 +722,15 @@ function renderToolbar(count) {
 
 // expand collects the detail renderers of expanded targets; render() calls
 // them once the row is in the page.
-function renderTarget(t, s, expand) {
+function renderTarget(t, s, expand, anim) {
   const node = $("#row").content.firstElementChild.cloneNode(true);
   node.dataset.target = t.id;
   const [label, color] = STATUS[statusOf(t)];
+  // A new status: the row flashes in its colour.
+  if (anim && anim.flash.has(t.id)) {
+    node.classList.add("flash");
+    node.style.setProperty("--fc", color);
+  }
 
   const badge = $(".badge", node);
   badge.textContent = label;
@@ -404,8 +748,8 @@ function renderTarget(t, s, expand) {
     if (rowNote && rowNote.id === t.id) who.append(el("span", "row-note", rowNote.text));
   }
   $(".uptime", node).textContent = s.uptime === null ? "–" : `${s.uptime.toFixed(s.uptime === 100 ? 0 : 2)} %`;
-  $(".latency", node).textContent = t.paused ? "–" : ms(s.last);
-  renderBeats($(".beats", node), t);
+  $(".latency", node).textContent = ms(latencyOf(t, s));
+  renderBeats($(".beats", node), t, anim);
 
   const expandButton = $(".expand", node);
   expandButton.setAttribute("aria-label", `${t.name}: chart, figures and actions`);
@@ -430,19 +774,29 @@ function renderTarget(t, s, expand) {
   return node;
 }
 
-function renderBeats(box, t) {
+// The last cycles, one beat each; the newest, while it is being probed, is
+// built from its probes so far (see liveBeat). On a new cycle the strip
+// slides left by one beat; a beat just recorded arrives.
+function renderBeats(box, t, anim) {
   // As many recent cycles as fit; refit on resize via render().
   const width = box.clientWidth || Math.min(window.innerWidth - 80, 540);
   const n = Math.max(10, Math.min(90, Math.floor(width / BEAT_PX)));
+  const last = t.loss.length - 1;
   box.replaceChildren();
   for (let i = t.loss.length - n; i < t.loss.length; i++) {
+    if (i === last && showsLive(t)) {
+      box.append(liveBeat(t));
+      continue;
+    }
     const b = el("span", "beat");
     const c = beatColor(t.loss[i]);
     if (c) b.style.setProperty("--c", c);
     const at = state.end - (t.loss.length - 1 - i) * state.cycle_s;
     b.title = describe(t, i, at);
+    if (i === last && anim && anim.arrive.has(t.id)) b.classList.add("arrive");
     box.append(b);
   }
+  box.classList.toggle("slide", !!(anim && anim.shift));
 }
 
 function renderDetail(detail, t, s) {
@@ -489,6 +843,20 @@ function renderDetail(detail, t, s) {
     actions.append(b);
   };
   const base = `api/targets/${t.id}`;
+  const feed = $(".row-feed", detail);
+  renderRowFeed(feed, t);
+  const events = el("button", null, rowFeeds.has(t.id) ? "Hide events" : "Events");
+  events.type = "button";
+  events.title = "This target's problems of the last 24 hours: DOWN, and loss of probes";
+  events.setAttribute("aria-expanded", String(rowFeeds.has(t.id)));
+  events.addEventListener("click", () => {
+    if (rowFeeds.has(t.id)) rowFeeds.delete(t.id);
+    else rowFeeds.add(t.id);
+    renderRowFeed(feed, t);
+    events.textContent = rowFeeds.has(t.id) ? "Hide events" : "Events";
+    events.setAttribute("aria-expanded", String(rowFeeds.has(t.id)));
+  });
+  actions.append(events);
   renderTrace($(".trace", detail), t);
   if (!traces.has(t.id))
     action("Trace route", "Show the path to this host live, hop by hop, like mtr: one probe to every hop each second, with loss and latency per hop", () => startTrace(t));
@@ -1212,7 +1580,31 @@ window.addEventListener("resize", () => {
   }, 150);
 });
 
+// The bar: folded by default; this browser remembers it unfolded.
+const MENU_KEY = "zpinger.menu";
+function setMenu(open) {
+  $("#bar").classList.toggle("open", open);
+  $("#menu-body").hidden = !open;
+  $("#menu").setAttribute("aria-expanded", String(open));
+  try {
+    if (open) localStorage.setItem(MENU_KEY, "1");
+    else localStorage.removeItem(MENU_KEY);
+  } catch {}
+}
+let menuOpen = false;
+try {
+  menuOpen = localStorage.getItem(MENU_KEY) === "1";
+} catch {}
+setMenu(menuOpen);
+$("#menu").addEventListener("click", () => setMenu($("#menu-body").hidden));
+$("#events").addEventListener("click", () => {
+  feedOpen = !feedOpen;
+  if (state) render();
+});
+
 // A background tab does not poll; it catches up when shown again.
-load();
-setInterval(() => document.hidden || load(), REFRESH_MS);
-document.addEventListener("visibilitychange", () => document.hidden || load());
+load().then(pollLive);
+setInterval(() => document.hidden || pollLive(), LIVE_MS);
+setInterval(() => document.hidden || load(), STATE_FALLBACK_MS);
+setInterval(() => document.hidden || tick(), 250);
+document.addEventListener("visibilitychange", () => document.hidden || pollLive());

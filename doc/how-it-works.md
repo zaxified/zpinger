@@ -74,12 +74,20 @@ table it stops refreshing, so a selection is not lost.
 
 Every cycle (aligned to the wall clock) takes a copy of the active targets,
 resolves names, and pings all of them in **one** `Pinger` round in `.count`
-mode: 5 echo requests per target, 1 s apart per target, 20 ms apart globally,
-with a random start offset of up to 500 ms per target. That is the library's
-pacing at work: the probes are spread out, never burst into the network. The
-results are recorded under a lock: probes sent, replies, the median
-round-trip time and the jitter (the mean difference between consecutive
-replies' round-trip times, as ping tools report it). The web UI therefore never waits for a cycle.
+mode, spread over the whole cycle: 5 echo requests per target, a fifth of the
+probing window apart (11.6 s at one minute), the first at a random point of
+the first fifth, and at least 20 ms between any two packets. The probes of all targets
+therefore lie scattered over the minute in no fixed order: the network never
+sees a burst, and a short outage anywhere in the minute shows, not only one
+during the first seconds. The window ends 2 s before the next cycle: the last
+probe goes out by then, and its 1 s timeout leaves a second of room. A target
+added, moved or resumed during a cycle joins the next one, so its first
+result takes up to two cycles. Every answer and timeout goes to
+the live view (`/api/live`) as it comes; at the end the results are recorded
+under a lock: probes sent, replies, the median round-trip time and the jitter
+(the mean difference between consecutive replies' round-trip times, so
+between probes a fifth of the cycle apart). The web UI never waits for a
+cycle.
 
 History is a ring of 1440 slots per target, indexed by cycle number, so a gap
 (daemon stopped, target paused) needs no bookkeeping: a slot whose timestamp is
@@ -113,8 +121,10 @@ starts, but only to a listed target and within the server's bounds
 
 - **One serialization per change.** The state JSON is built once per cycle
   (or target change) and served to every viewer from a cache. The page polls
-  every 15 s with `If-None-Match`, so most polls are a body-less `304`; a
-  background tab does not poll at all. Measured with 64 targets (a 1.1 MB
+  only the small live view (`/api/live`, the running cycle's probes) every
+  2 s, and fetches the state when that says it changed, with
+  `If-None-Match` (a body-less `304` when nothing did); a background tab does
+  not poll at all. Measured with 64 targets (a 1.1 MB
   state): 200 concurrent clients fetching it for 10 s, 10 660 full
   responses, 99 threads, 34 MB RSS; idle 11 MB.
 - **Bounded connections.** At most 256 at once and 16 from one client

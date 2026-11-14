@@ -6,6 +6,38 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
+- **The probes are spread over the whole cycle.** Each target's 5 probes go
+  out a fifth of the probing window apart (11.6 s at one minute), starting at a
+  random point, so the probes of all targets are scattered over the minute
+  instead of a burst in its first seconds: a short outage anywhere in the
+  minute shows, and the network never sees a burst. The jitter figure is
+  now the round-trip change between probes 11.6 s apart, not 1 s; the
+  problem threshold (10 ms) stays. A target added during a cycle joins the
+  next one: its first result takes up to two cycles.
+- **The page is live.** New `GET /api/live` lists the probes of the cycle
+  being probed as they come; the page polls it every 2 s and loads the
+  state only when a cycle was recorded or something changed (it polled the
+  whole state every 15 s). A row's newest beat is built from its probes so
+  far and its latency follows each probe; a new cycle slides the strip and
+  the recorded beat arrives; a target changing status flashes its row. The
+  tab's title counts the targets that need attention, and the icon takes
+  the colour of the worst status.
+- **A floating, folded top bar.** One line: the logo, whose ring counts down
+  to the next cycle (grey while the server does not answer), the `ok` and
+  `nok` pills, how many targets a filter leaves, Events, and ☰ for every
+  pill, the search, the order and the tags. A thin line along its bottom
+  fills with the cycle's probes, green answered, red lost.
+- **Events.** The outages and losses of the last 24 hours, read from the
+  history: under the bar for all targets shown, or in a target's detail for
+  that one; both hidden until asked for. A run of lossy cycles is one event
+  (up to 5 clean cycles inside it do not end it), a DOWN one when some of
+  its cycles lost every probe; a single cycle that lost one probe is left
+  out.
+- **`--demo` keeps 12 hours of real data** (was 1 hour; half the history, so
+  12 hours at the default `--cycle 60`); only the older half is sample data.
+  The real data includes what the history file kept from before a restart.
+  The route change scenario moved to 10 to 7 hours before the real data, to
+  stay in the sample half.
 - **Built with Zig 0.17.1** (was 0.17.0) and zig-libs tag `2026-11-13`. The
   0.17.1 compiler fixes a miscompile of signed-to-narrower-unsigned casts in
   optimized builds. `--listen` now also accepts an IPv6 literal with an IPv4
