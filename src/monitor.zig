@@ -156,6 +156,14 @@ pub const Monitor = struct {
     /// The oldest sample of a demo target loaded from the history file (which
     /// keeps only real ones); 0 = none.
     demo_loaded_from: i64 = 0,
+    /// Fills still to do after every cycle rather than hourly: the sample
+    /// data is scaled to the median of the real cycles so far, and the first
+    /// one can be far off (measured: 155 ms for a 12 ms target, a cold path),
+    /// which then lasted until the next full hour.
+    demo_warmup: u8 = 9, // the first fill and 9 more: the first 10 cycles
+    /// Fills done: the page fetches the whole state when it changes (a delta
+    /// would keep the old sample data).
+    demo_fills: u32 = 0,
     /// Bumped on every change the web page would show; with the cycle start
     /// it identifies one `stateJson` result (see `StateTag`).
     version: u64 = 0,
@@ -604,8 +612,12 @@ pub const Monitor = struct {
     fn demoFillLocked(m: *Monitor, t: i64) void {
         if (m.demo_since == 0) m.demo_since = if (m.demo_loaded_from != 0) @min(t, m.demo_loaded_from) else t;
         const hour = t - @mod(t, 3600);
-        if (hour == m.demo_hour) return;
+        if (hour == m.demo_hour) {
+            if (m.demo_warmup == 0) return;
+            m.demo_warmup -= 1;
+        }
         m.demo_hour = hour;
+        m.demo_fills +%= 1;
         // On a cycle boundary (`t` and `demo_since` are), so the real
         // samples are found below whatever `cycle_s` is.
         const from = hour - @divTrunc(history_len * m.cycle_s, 2);
@@ -914,8 +926,8 @@ pub const Monitor = struct {
     /// start `newest`; `null` where there is no sample.
     fn writeStateLocked(m: *Monitor, w: *Io.Writer, newest: i64, since: ?i64) Io.Writer.Error!void {
         try w.print(
-            "{{\"read_only\":{},\"version\":{d},\"demo_from\":{d},\"cycle_s\":{d},\"probes\":{d},\"ack_clear_after\":{d},\"end\":{d},",
-            .{ m.read_only, m.version, m.demo_from, m.cycle_s, probes_per_cycle, ack_clear_after, newest },
+            "{{\"read_only\":{},\"version\":{d},\"demo_from\":{d},\"demo_fills\":{d},\"cycle_s\":{d},\"probes\":{d},\"ack_clear_after\":{d},\"end\":{d},",
+            .{ m.read_only, m.version, m.demo_from, m.demo_fills, m.cycle_s, probes_per_cycle, ack_clear_after, newest },
         );
         if (since) |v| try w.print("\"since\":{d},", .{v});
         try w.writeAll("\"targets\":[");
@@ -1569,6 +1581,32 @@ test "demo: sample data before the real 12 hours, real data kept" {
     try testing.expectEqual(0, @mod(m.demo_from, 7));
     const calm7 = t.history[m.slot(m.demo_from - 7 * 30)];
     try testing.expect(calm7.recv > 0 and calm7.rtt_us >= 3000 and calm7.rtt_us < 10_000);
+}
+
+test "demo: a slow first cycle does not scale the sample data for an hour" {
+    var m = testMonitor();
+    defer m.deinit();
+    m.demo = true;
+    const id = try m.add("a", "192.0.2.1", &.{});
+    const t = m.targets.items[0];
+    t.scenario = .steady;
+    const hour: i64 = 1_700_006_400;
+    fakeCycle(&m, id, hour + 600, 5);
+    t.history[m.slot(hour + 600)].rtt_us = 150_000; // a cold path: 150 ms
+    m.demoFillLocked(hour + 600);
+    try testing.expect(t.history[m.slot(hour - 3600)].rtt_us > 100_000);
+    // The next cycles (3 ms) refill within the same hour.
+    for (11..20) |i| {
+        fakeCycle(&m, id, hour + 60 * @as(i64, @intCast(i)), 5);
+        m.demoFillLocked(hour + 60 * @as(i64, @intCast(i)));
+    }
+    const calm = t.history[m.slot(hour - 3600)];
+    try testing.expect(calm.recv > 0 and calm.rtt_us >= 3000 and calm.rtt_us < 10_000);
+    try testing.expectEqual(@as(u32, 10), m.demo_fills);
+    // Then hourly again.
+    fakeCycle(&m, id, hour + 1200, 5);
+    m.demoFillLocked(hour + 1200);
+    try testing.expectEqual(@as(u32, 10), m.demo_fills);
 }
 
 test "demo: real samples from the history file stay real" {

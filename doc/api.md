@@ -43,8 +43,9 @@ cycle_s`. A `since` that is not a cycle start within the last 24 hours gets
 the whole state (no `since` in the answer). The page asks for a delta every
 time the live view says the state changed: a few hundred bytes per target
 rather than the whole day (3.5 MB, 650 KB compressed, at 200 targets).
-Fetch the whole state again when `demo_from` changed (a demo renews its
-sample data every hour) or a target is new.
+Fetch the whole state again when `demo_from` or `demo_fills` changed (a demo
+renews its sample data every hour, and after each of its first 10 cycles) or a
+target is new.
 
 The answer also has `version` (it changes with every recorded cycle and
 every change of the targets) and `end`, the start (unix s) of the newest

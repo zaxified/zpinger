@@ -67,6 +67,10 @@ and these entries come from zig-fping's CHANGELOG.md.
 - **`--demo` keeps 12 hours of real data** (was 1 hour; half the history, so
   12 hours at the default `--cycle 60`); only the older half is sample data.
   The real data includes what the history file kept from before a restart.
+  For the first 10 cycles the sample data is scaled again after every
+  cycle: it is scaled to the real median, and one slow first cycle (155 ms
+  for a 12 ms target, seen after a restart) made the whole sample half ten
+  times too slow until the next full hour.
   The route change scenario moved to 10 to 7 hours before the real data, to
   stay in the sample half.
 - **Built with Zig 0.17.1** (was 0.17.0) and zig-libs tag `2026-11-13`. The

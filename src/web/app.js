@@ -230,7 +230,7 @@ async function load(full = false) {
 
 // `old` with the delta `d` put after it, or null when it does not fit.
 function mergeDelta(old, d) {
-  if (!old || d.since !== old.end || d.cycle_s !== old.cycle_s || d.demo_from !== old.demo_from) return null;
+  if (!old || d.since !== old.end || d.cycle_s !== old.cycle_s || d.demo_from !== old.demo_from || d.demo_fills !== old.demo_fills) return null;
   const known = new Map(old.targets.map((t) => [t.id, t]));
   const shift = (d.end - d.since) / d.cycle_s;
   for (const t of d.targets) {
