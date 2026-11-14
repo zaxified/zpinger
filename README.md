@@ -3,7 +3,7 @@
 [![CI](https://github.com/zaxified/zpinger/actions/workflows/ci.yml/badge.svg)](https://github.com/zaxified/zpinger/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/zaxified/zpinger?include_prereleases&sort=semver)](https://github.com/zaxified/zpinger/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Zig 0.17](https://img.shields.io/badge/Zig-0.17-f7a41d.svg)](https://ziglang.org)
+[![Zig](https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fraw.githubusercontent.com%2Fzaxified%2Fzpinger%2Fmain%2F.zigversion&search=%5E(%5B0-9.%5D%2B)&replace=%241&label=Zig&color=f7a41d)](https://ziglang.org)
 
 A small ping monitor: a daemon that pings your hosts five times a minute and serves
 a web page with their status, latency and packet loss over the last 24
