@@ -318,7 +318,7 @@ test "the shape of a delta and of the live view (API contract, doc/api.md)" {
     var buf: [2048]u8 = undefined;
     const got = try maskNumbers(&buf, d.json, &.{ "\"end\":", "\"since\":" });
     try testkit.expectBytes(
-        \\{"read_only":true,"version":1,"demo_from":0,"demo_fills":0,"cycle_s":1073741824,"probes":5,"ack_clear_after":5,"end":N,"since":N,"targets":[{"id":1,"name":"a","host":"192.0.2.1","status":"pending","paused":false,"acked":false,"ok_streak":0,"error":null,"sample":false,"tags":["lab"],"address":null,"dns":"ok","rtt":[null],"jitter":[null],"loss":[null]}]}
+        \\{"read_only":true,"version":1,"started":0,"demo_from":0,"demo_fills":0,"cycle_s":1073741824,"probes":5,"ack_clear_after":5,"end":N,"since":N,"targets":[{"id":1,"name":"a","host":"192.0.2.1","status":"pending","paused":false,"acked":false,"ok_streak":0,"error":null,"sample":false,"tags":["lab"],"address":null,"dns":"ok","rtt":[null],"jitter":[null],"loss":[null]}]}
     , got);
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();

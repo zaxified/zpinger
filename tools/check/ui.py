@@ -6,7 +6,7 @@
 # .json) and a writable one whose list is exactly
 #   {"targets":[{"name":"x","host":"192.0.2.1","tags":["old"]}]}
 #   ui.py DEMO_URL RW_URL SHOTDIR      `ok`/`FAIL` lines, exit 1 on any FAIL
-import asyncio, base64, json, os, subprocess, sys, tempfile, time, unicodedata, urllib.request
+import asyncio, base64, json, os, statistics, subprocess, sys, tempfile, time, unicodedata, urllib.request
 import websockets
 
 DEMO, RW, SHOTS = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -159,7 +159,7 @@ async def main():
                     def win(k):
                         loss = [v for v in t["loss"][-k:] if v is not None]
                         jit = [v for v in t["jitter"][-k:] if v is not None]
-                        return (sum(loss) / len(loss) if loss else 0), (sum(jit) / len(jit) if jit else 0)
+                        return (sum(loss) / len(loss) if loss else 0), (statistics.median(jit) if jit else 0)
                     h, d = win(60), win(1440)
                     status = "acked" if t["status"] == "down" and t["acked"] else t["status"]
                     tier = {"down": 0, "degraded": 1, "acked": 4, "pending": 6, "paused": 7}.get(status)

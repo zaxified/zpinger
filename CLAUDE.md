@@ -60,7 +60,8 @@ with the previous pin: a new default-on feature in a module arrives silently.
 - Tags: at most 8, lowercase, no spaces or commas; tag chips filter with AND; the search
   matches every word against name, host and tags. View state lives in the URL fragment
   (`#open=&tags=&q=&sort=&rev=&st=`).
-- A problem is **mean loss ≥ 1 % or mean jitter ≥ 10 ms** over the window (since 2026-11-14
+- A problem is **mean loss ≥ 1 % or median jitter ≥ 10 ms** over the window (median since 2026-11-14,
+  owner: a busy probing host spiked every target's mean over 10 ms; since 2026-11-14
   jitter compares probes a fifth of the cycle apart, ~11.6 s; threshold kept, owner OK). "Problems first"
   tiers: DOWN → LOSS now → problem 1 h → problem 24 h → ACK → rest → NEW (status `pending`) → PAUSED.
 - Status pills (`ok · nok | up · down · loss · ack · new · paused`; `new` = status `pending`, labelled NEW since 2026-11-14 because PENDING overflowed the badge) are always rendered

@@ -169,7 +169,14 @@ grep -q 'event=conn client=127.0.0.1 action=closed reason=timeout requests=0 ms=
 # A second instance on the same port refuses to start (no SO_REUSEPORT).
 rc=0; timeout 5 "$BIN" --listen 127.0.0.1:$PORT --targets second.json >log2 2>&1 || rc=$?
 [ "$rc" = 1 ] && grep -q 'cannot listen on' log2 || fail "a second instance shared the port (rc=$rc)"
-stop
+# SIGTERM (systemctl stop): the history is written, the exit is clean.
+rm -f history.json
+kill -TERM "$PID"
+rc=0; wait "$PID" || rc=$?
+PID=
+[ "$rc" = 0 ] || fail "SIGTERM: exit status $rc, expected 0"
+grep -q 'event=stop signal=TERM' log || fail "SIGTERM: no stop event"
+grep -q '"samples":\[\[' history.json || fail "SIGTERM: history not written"
 
 # Read-only: history survives the restart, every change is refused.
 start --read-only

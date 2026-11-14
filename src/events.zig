@@ -188,8 +188,10 @@ fn writeTime(w: *Io.Writer, unix_s: i64) Io.Writer.Error!void {
 
 /// The `event=` of a line.
 pub const Kind = enum {
-    /// Started (the settings that matter for security), or stopping.
+    /// Started (the settings that matter for security).
     start,
+    /// Stopping on SIGTERM or SIGINT, the history written.
+    stop,
     /// A connection refused at accept, or closed before it sent a request.
     conn,
     /// A request: refused ones always, the rest with `--access-log all`.

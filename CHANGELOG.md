@@ -4,7 +4,19 @@ This application started in the zig-fping repository as
 `example-apps/fping-watch`; its history was carried over (`git filter-repo`),
 and these entries come from zig-fping's CHANGELOG.md.
 
-## Unreleased
+## 0.3.0 (unreleased)
+
+- **A problem is judged by the median jitter**, not the mean: 1 % packet
+  loss on average or a median jitter of 10 ms, over the hour or the day. A
+  few spikes (a busy probing host, one bad minute) no longer make every
+  target "nok"; a jittery link still does. The figures still show the mean.
+- **A stop writes the history.** SIGTERM (`systemctl stop`, a package
+  upgrade's restart) and SIGINT write the history before the process exits
+  (status 0); a big history is written only every few cycles, so a restart
+  lost up to 15 of them. A `stop` event in the security log says so.
+- **A page reloads the whole state after a server restart.** The state has
+  `started` (when the server started); a page that sees it change stops
+  merging deltas onto a history the server may no longer have.
 
 - **The probes are spread over the whole cycle.** Each target's 5 probes go
   out a fifth of the probing window apart (11.6 s at one minute), starting at a

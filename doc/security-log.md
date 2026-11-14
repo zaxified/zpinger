@@ -33,6 +33,7 @@ event=http client=198.51.100.7 peer=127.0.0.1 status=429 reason=trace_rate metho
 | Event | When | Keys |
 |---|---|---|
 | `start` | the daemon starts | `version listen targets mode trust_proxy allow_host trace_max access_log dns_stale` |
+| `stop` | the daemon stops on SIGTERM (`systemctl stop`, a restart) or SIGINT, after writing the history | `signal` (`TERM INT`) |
 | `conn action=refused` | a connection closed at accept, unanswered | `reason`: `total_cap` (256 open), `per_ip_cap` (16 from one client), `store_full` (too many clients tracked at once) |
 | `conn action=closed` | a timeout cut a connection off, or it ended without a single request | `reason`: `timeout` (a slowloris or a slow reader held it to a 10 s deadline), `no_request` (closed by the client: a port scan, TLS on the plain-HTTP port), `idle` (a kept-alive connection no next request came on: browsers do that; `debug` level); `requests ms`, with a timeout `phase` (`no_request head body write response`) |
 | `http` | a request, with `--access-log refused` (the default) only those answered 400 or above, with `all` every one | `status reason method path ms bytes ua` (in this order), `host` (with `host_not_allowed`), `xff_ignored` (an X-Forwarded-For from a peer that is not a trusted proxy) |

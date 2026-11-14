@@ -197,8 +197,10 @@ pub const Monitor = struct {
     /// newest serialization when its turn came, so an older one never lands
     /// over a newer one.
     save_mutex: Io.Mutex = .init,
-    /// For `health()`, read without the lock: when `loop` started, when the
-    /// last cycle finished (0: none yet), and whether its probing worked.
+    /// For `health()`, read without the lock: when `loop` started (also the
+    /// state's `started`: a page reloads the whole state when it changes),
+    /// when the last cycle finished (0: none yet), and whether its probing
+    /// worked.
     started_at: std.atomic.Value(i64) = .init(0),
     cycle_done_at: std.atomic.Value(i64) = .init(0),
     probing_ok: std.atomic.Value(bool) = .init(true),
@@ -809,8 +811,8 @@ pub const Monitor = struct {
 
     /// After every cycle, or every few cycles for a big history: about a
     /// megabyte written a minute at most (an fsync'd 8.6 MB a minute at 200
-    /// targets was 12 GB a day). A crash or restart loses the cycles since
-    /// the last write, at most 15.
+    /// targets was 12 GB a day). A crash loses the cycles since the last
+    /// write, at most 15; a stop (SIGTERM) writes it first (`saveNow`).
     fn saveHistoryLocked(m: *Monitor) void {
         if (m.history_path == null) return;
         if (m.history_wait > 0) {
@@ -842,6 +844,19 @@ pub const Monitor = struct {
     fn replacePending(gpa: std.mem.Allocator, slot_ptr: *?[]u8, data: []u8) void {
         if (slot_ptr.*) |old| gpa.free(old);
         slot_ptr.* = data;
+    }
+
+    /// Writes the history now, whatever `history_wait` says, and every
+    /// file still waiting: before an exit (SIGTERM, a package upgrade),
+    /// which would otherwise lose the cycles since the last write.
+    pub fn saveNow(m: *Monitor) void {
+        {
+            m.mutex.lockUncancelable(m.io);
+            defer m.mutex.unlock(m.io);
+            m.history_wait = 0;
+            m.saveHistoryLocked();
+        }
+        m.flushSaves();
     }
 
     /// Writes the files serialized since the last call. Call with `mutex`
@@ -966,8 +981,8 @@ pub const Monitor = struct {
     /// start `newest`; `null` where there is no sample.
     fn writeStateLocked(m: *Monitor, w: *Io.Writer, newest: i64, since: ?i64) Io.Writer.Error!void {
         try w.print(
-            "{{\"read_only\":{},\"version\":{d},\"demo_from\":{d},\"demo_fills\":{d},\"cycle_s\":{d},\"probes\":{d},\"ack_clear_after\":{d},\"end\":{d},",
-            .{ m.read_only, m.version, m.demo_from, m.demo_fills, m.cycle_s, probes_per_cycle, ack_clear_after, newest },
+            "{{\"read_only\":{},\"version\":{d},\"started\":{d},\"demo_from\":{d},\"demo_fills\":{d},\"cycle_s\":{d},\"probes\":{d},\"ack_clear_after\":{d},\"end\":{d},",
+            .{ m.read_only, m.version, m.started_at.load(.monotonic), m.demo_from, m.demo_fills, m.cycle_s, probes_per_cycle, ack_clear_after, newest },
         );
         if (since) |v| try w.print("\"since\":{d},", .{v});
         try w.writeAll("\"targets\":[");

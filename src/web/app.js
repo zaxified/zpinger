@@ -22,7 +22,7 @@ let lastHeard = Date.now(); // the last answer from the server
 // (see healthOf), then the status now.
 const PILLS = {
   ok: ["ok", "var(--up)", "Probed, and no problem in the last hour"],
-  nok: ["nok", "var(--down)", "Needs attention: DOWN, losing probes now, or a problem in the last hour (1 % packet loss or 10 ms of jitter on average, or more); acknowledged outages are not counted"],
+  nok: ["nok", "var(--down)", "Needs attention: DOWN, losing probes now, or a problem in the last hour (1 % packet loss on average, or a median jitter of 10 ms, or more); acknowledged outages are not counted"],
   up: ["up", "var(--up)", "Every probe of the last cycle answered"],
   down: ["down", "var(--down)", "Every probe of the last cycle lost"],
   degraded: ["loss", "var(--warn)", "Some probes of the last cycle lost"],
@@ -133,10 +133,18 @@ const time = (unix) => HHMM.format(unix * 1000);
 // Figures over the last `cycles` cycles (default: all 24 hours), in one
 // pass with no copies: a redraw computes them for every target, twice. The
 // 95th percentile needs a sort, so it is a function, called by the detail.
+// The median of a typed array, sorted in place.
+function medianOf(a) {
+  a.sort();
+  const h = a.length >> 1;
+  return a.length % 2 ? a[h] : (a[h - 1] + a[h]) / 2;
+}
+
 function summarize(t, cycles = t.rtt.length) {
   const from = Math.max(0, t.rtt.length - cycles);
   let samples = 0, up = 0, lossSum = 0, rttN = 0, rttSum = 0, jitN = 0, jitSum = 0;
   let min = null, max = null;
+  const jits = new Float64Array(t.rtt.length - from); // for the median
   for (let i = from; i < t.rtt.length; i++) {
     const loss = t.loss[i], rtt = t.rtt[i], jit = t.jitter[i];
     if (loss !== null) {
@@ -151,7 +159,7 @@ function summarize(t, cycles = t.rtt.length) {
       if (max === null || rtt > max) max = rtt;
     }
     if (jit !== null) {
-      jitN++;
+      jits[jitN++] = jit;
       jitSum += jit;
     }
   }
@@ -170,6 +178,9 @@ function summarize(t, cycles = t.rtt.length) {
     max,
     p95: () => percentile(t.rtt.slice(from).filter((v) => v !== null), 95),
     jitter: jitN ? jitSum / jitN : null,
+    // What the problem rule looks at: a few spikes (a busy host, one bad
+    // minute) move the mean, not the median; a jittery link moves both.
+    jitterMedian: jitN ? medianOf(jits.subarray(0, jitN)) : null,
     loss: samples ? lossSum / samples : null,
     last,
     lastJitter,
@@ -231,9 +242,10 @@ async function load(full = false) {
   }
 }
 
-// `old` with the delta `d` put after it, or null when it does not fit.
+// `old` with the delta `d` put after it, or null when it does not fit: a
+// restarted server (`started`) may not have the history the page has.
 function mergeDelta(old, d) {
-  if (!old || d.since !== old.end || d.cycle_s !== old.cycle_s || d.demo_from !== old.demo_from || d.demo_fills !== old.demo_fills) return null;
+  if (!old || d.since !== old.end || d.started !== old.started || d.cycle_s !== old.cycle_s || d.demo_from !== old.demo_from || d.demo_fills !== old.demo_fills) return null;
   const known = new Map(old.targets.map((t) => [t.id, t]));
   const shift = (d.end - d.since) / d.cycle_s;
   for (const t of d.targets) {
@@ -858,11 +870,13 @@ function matches(t) {
 }
 
 // A window had a problem when it lost this much on average (percent), or its
-// mean jitter reached this (milliseconds): how much, not whether at all, so
-// one lost probe in an hour is not a problem.
+// median jitter reached this (milliseconds): how much, not whether at all, so
+// one lost probe in an hour is not a problem, and neither are a few jitter
+// spikes (the median since 2026-11-14: a busy probing host spiked the mean
+// of every target over the threshold).
 const LOSS_WARN_PCT = 1;
 const JITTER_WARN_MS = 10;
-const troubled = (s) => s.loss >= LOSS_WARN_PCT || s.jitter >= JITTER_WARN_MS;
+const troubled = (s) => s.loss >= LOSS_WARN_PCT || s.jitterMedian >= JITTER_WARN_MS;
 
 // Problems first, the most urgent on top: DOWN, LOSS now, a problem in the
 // last hour, one in the last 24 hours, an acknowledged outage (known, so

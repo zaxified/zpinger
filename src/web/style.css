@@ -412,7 +412,11 @@ body.compact .target .tags { display: none; }
 body.compact .badge { min-width: 52px; padding: 1px 6px; font-size: 11px; }
 body.compact .beats { height: 16px; gap: 3px; }
 body.compact .beat { flex-basis: 5px; border-radius: 1px; }
-body.compact .figures { flex-direction: row; gap: 12px; align-items: baseline; min-width: 130px; justify-content: flex-end; }
+body.compact .figures { flex-direction: row; gap: 12px; align-items: baseline; min-width: 0; justify-content: flex-end; }
+/* Two columns, each right-aligned at a fixed width, so the figures line up
+   from row to row ("100 %" under "96.45 %", "–" under "154 ms"). */
+body.compact .uptime { min-width: 7.5ch; text-align: right; }
+body.compact .latency { min-width: 7ch; text-align: right; }
 body.compact .uptime { font-size: 13px; }
 body.compact .detail { background: var(--bg); padding: 12px 14px 14px; }
 body.compact .stats { gap: 4px 16px; margin-top: 8px; }

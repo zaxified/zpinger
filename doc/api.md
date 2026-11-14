@@ -50,7 +50,9 @@ the whole state is built once and shared by every viewer, a delta only by
 the viewers asking from the same cycle. The page asks for a delta every
 time the live view says the state changed: a few hundred bytes per target
 rather than the whole day (3.5 MB, 650 KB compressed, at 200 targets).
-Fetch the whole state again when `demo_from` or `demo_fills` changed (a demo
+Fetch the whole state again when `started` (when the server started, unix
+seconds: a restarted one may not have kept the history), `demo_from` or
+`demo_fills` changed (a demo
 renews its sample data every hour, and after each of its first 10 cycles) or a
 target is new.
 

@@ -6,8 +6,9 @@ The page's default order, the most urgent on top:
 
 1. DOWN (not acknowledged);
 2. LOSS: the last cycle lost some probes;
-3. a problem in the last hour: 1 % packet loss or 10 ms of jitter on
-   average, or more (one lost probe in an hour is not a problem);
+3. a problem in the last hour: 1 % packet loss on average, or a median
+   jitter of 10 ms, or more (one lost probe in an hour is not a problem,
+   nor are a few jitter spikes);
 4. such a problem in the last 24 hours;
 5. ACK: an acknowledged outage, known and so below the unknown ones;
 6. the rest, then NEW (not probed yet), then PAUSED.
