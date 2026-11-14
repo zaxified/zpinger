@@ -76,13 +76,13 @@ runs writable; the health check then insists on read-only.
   notify: restart zpinger
 - name: zpinger package
   ansible.builtin.get_url:
-    url: https://github.com/zaxified/zpinger/releases/download/v0.2.0/zpinger_0.2.0_amd64.deb
-    dest: /var/cache/zpinger_0.2.0_amd64.deb
+    url: https://github.com/zaxified/zpinger/releases/download/v0.3.0/zpinger_0.3.0_amd64.deb
+    dest: /var/cache/zpinger_0.3.0_amd64.deb
     # Pinned from the release's SHA256SUMS: a checksum fetched along with
     # the package would prove nothing.
     checksum: "sha256:<the hash from SHA256SUMS>"
 - name: zpinger installed
-  ansible.builtin.apt: { deb: /var/cache/zpinger_0.2.0_amd64.deb }
+  ansible.builtin.apt: { deb: /var/cache/zpinger_0.3.0_amd64.deb }
 - name: zpinger is healthy and read-only
   ansible.builtin.uri: { url: "http://127.0.0.1:8080/healthz" }
   register: health
