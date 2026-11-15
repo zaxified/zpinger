@@ -114,7 +114,7 @@ Not there yet; know them before you expose it:
 - **Names resolve 16 at a time**, each lookup bounded (2 s per attempt, 2
   attempts, A and AAAA), and an address is kept for its DNS TTL (1 minute
   to 1 hour); numeric addresses never wait. When DNS does not answer, the
-  last address is probed for up to `--dns-stale` (24 hours) and the page
+  last address is probed for up to `--dns-stale` (24 hours) after its answer expired and the page
   says so; a name that no longer exists shows its target DOWN.
 - **A name follows the host's network.** zpinger listens to the kernel's
   address and route notifications (what `ip monitor` reads, no privilege

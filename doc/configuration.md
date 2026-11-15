@@ -30,7 +30,7 @@ The history is kept in `/var/lib/zpinger/history.json`.
 | `--trace-idle SECONDS` | `600`, read-only `60` | stop a live trace nobody watched this long (a background tab does not poll) |
 | `--trace-age SECONDS` | `3600`, read-only `600` | stop every live trace this long after it started |
 | `--trust-proxy on\|off` | `on` | for a request from a loopback peer (your reverse proxy), the client is the address its `X-Forwarded-For` names, or without that header its `X-Real-IP`; every local user counts as that proxy, so on a host shared with people you do not trust put the port out of their reach |
-| `--dns-stale SECONDS` | `86400` | keep probing a name's last address this long while DNS does not answer; `0` = never |
+| `--dns-stale SECONDS` | `86400` | keep probing a name's last address this long after its DNS answer expired (up to its TTL, 1 hour at most, after the last answer) while DNS does not answer; `0` = never |
 | `--dns-rate N` | `20` | names looked up per second on average, at most: a cycle looks up `N` × its length of them, those over the limit keep their address until the next cycle (a name that lost its route first). With the default 200 targets it never applies; it keeps a big list from reaching the local resolver in one burst ([how-it-works.md](how-it-works.md)) |
 | `--access-log refused\|all\|off` | `refused` | which requests become log lines: refused ones (status 400 and up), all, or none ([security-log.md](security-log.md)) |
 | `--log-level err\|warn\|info\|debug` | `info` | `warn` keeps the refusals and drops starts, audits and traces |

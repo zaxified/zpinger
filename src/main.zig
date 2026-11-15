@@ -51,8 +51,9 @@ const usage =
     \\                       (default 3600, read-only 600)
     \\  --trust-proxy on|off take the client address of a request from a loopback
     \\                       peer (a reverse proxy) from X-Forwarded-For (default on)
-    \\  --dns-stale SECONDS  keep probing a name's last address this long while
-    \\                       DNS does not answer (default 86400, 0 = never)
+    \\  --dns-stale SECONDS  keep probing a name's last address this long after
+    \\                       its DNS answer expired, while DNS does not
+    \\                       answer (default 86400, 0 = never)
     \\  --dns-rate N         names looked up per second on average, at most
     \\                       (default 20; more wait for the next cycle)
     \\  --access-log refused|all|off

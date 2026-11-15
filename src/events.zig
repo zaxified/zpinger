@@ -425,12 +425,14 @@ test "queue: never blocks; a full queue drops and counts, the report waits for r
     while (emit(.warn, .log, .system, null, "{s}", .{&long})) : (queued += 1) try testing.expect(queued < 100);
     try testing.expect(queued >= queue_size / 4000);
     try testing.expectEqual(1, dropped.getPtr(.system).load(.monotonic));
-    flushDropped(); // no room: kept, plus the report's own drop
+    while (emit(.warn, .log, .system, null, "x", .{})) {} // the rest, to the last byte that fits
     try testing.expectEqual(2, dropped.getPtr(.system).load(.monotonic));
+    flushDropped(); // no room (the report is longer than "x"): kept, plus the report's own drop
+    try testing.expectEqual(3, dropped.getPtr(.system).load(.monotonic));
     cap.open.store(true, .release);
     _ = cap.take();
     flushDropped();
-    try testing.expect(std.mem.endsWith(u8, cap.take(), "action=dropped class=system count=2\n"));
+    try testing.expect(std.mem.endsWith(u8, cap.take(), "action=dropped class=system count=3\n"));
     try testing.expectEqual(0, dropped.getPtr(.system).load(.monotonic));
 }
 

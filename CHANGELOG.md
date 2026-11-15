@@ -6,6 +6,20 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
+- **Names are cached by zig-libs `dns.CachingResolver`.** TTL bounds
+  (1 minute to 1 hour), serve-stale, the failure backoff and the entry bound
+  moved from zpinger into the library. User-visible: `--dns-stale` now counts
+  from the expiry of the name's DNS answer (RFC 8767), not from the last
+  answer, so an address is probed up to one TTL (1 hour at most) longer; a
+  name that does not exist is asked again after its negative TTL (the SOA's,
+  1 minute to 1 hour) instead of waiting a doubling backoff; the
+  error shown for a stale name comes from the cache. After a network change
+  the names whose address has no route are looked up at once and the others
+  spread over 10 minutes, as documented (before, all were looked up in the
+  next cycle). The log's `dns` events and the page's wording are unchanged.
+- **The log queue and the quoting are zig-libs `accesslog`'s**; the log
+  format is byte for byte what it was.
+
 - **Hop names are kept for their PTR record's own TTL** (within 1 minute and
   1 hour, as before), not for a fixed 5 minutes; the lookup and its cache are
   zig-libs `dns.CachingResolver`. A hop name's first lookup per hop is
