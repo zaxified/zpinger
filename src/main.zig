@@ -9,6 +9,7 @@
 const std = @import("std");
 const Io = std.Io;
 const stopsignal = @import("stopsignal");
+const syslog = @import("syslog");
 const http = @import("http");
 const abuseguard = @import("abuseguard");
 const Status = std.http.Status;
@@ -147,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     allowed_hosts = hosts.items;
-    events.journal = events.stderrIsJournal(init.environ_map.get("JOURNAL_STREAM"));
+    events.journal = syslog.journal.stderrIsJournal(init.environ_map.get("JOURNAL_STREAM"));
     events.init(gpa);
     defer events.deinit();
     tracer_state.addresses = &monitor;

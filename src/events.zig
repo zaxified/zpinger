@@ -315,33 +315,6 @@ pub fn deinit() void {
     };
 }
 
-/// Whether stderr is the journal: `JOURNAL_STREAM` (`device:inode`, set by
-/// systemd) names the file stderr is (systemd.exec(5)); a variable merely
-/// inherited by a shell on a terminal does not.
-// zig-libs request: syslog — no detection of stderr connected to journald.
-pub fn stderrIsJournal(journal_stream: ?[]const u8) bool {
-    const value = journal_stream orelse return false;
-    const colon = std.mem.findScalar(u8, value, ':') orelse return false;
-    const dev = std.fmt.parseInt(u64, value[0..colon], 10) catch return false;
-    const ino = std.fmt.parseInt(u64, value[colon + 1 ..], 10) catch return false;
-    const linux = std.os.linux;
-    var st: linux.Statx = undefined;
-    if (linux.errno(linux.statx(2, "", linux.AT.EMPTY_PATH, .{ .INO = true }, &st)) != .SUCCESS) return false;
-    return makedev(st.dev_major, st.dev_minor) == dev and st.ino == ino;
-}
-
-/// The `st_dev` number of a major:minor pair (glibc's `makedev`).
-fn makedev(major: u64, minor: u64) u64 {
-    return ((major & 0xfffff000) << 32) | ((major & 0xfff) << 8) | ((minor & 0xffffff00) << 12) | (minor & 0xff);
-}
-
-test "journal check: only the stream systemd named" {
-    try testing.expect(!stderrIsJournal(null));
-    try testing.expect(!stderrIsJournal("garbage"));
-    try testing.expect(!stderrIsJournal("1:1"));
-    try testing.expectEqual(@as(u64, 0x00000801), makedev(8, 1));
-}
-
 fn nowNs() u64 {
     const ns = Io.Clock.awake.now(std.Options.debug_io).nanoseconds;
     return @intCast(@max(ns, 0));
