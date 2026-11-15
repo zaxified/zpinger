@@ -24,6 +24,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .strip = strip,
         .imports = &.{
+            .{ .name = "accesslog", .module = zig_libs.module("accesslog") },
             .{ .name = "abuseguard", .module = zig_libs.module("abuseguard") },
             .{ .name = "datefmt", .module = zig_libs.module("datefmt") },
             .{ .name = "dns", .module = zig_libs.module("dns") },

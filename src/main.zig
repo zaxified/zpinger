@@ -227,7 +227,7 @@ pub fn main(init: std.process.Init) !void {
     // what the probing loop recorded: no viewer ever triggers a ping.
     var tasks: Io.Group = .init;
     defer tasks.cancel(io);
-    try tasks.concurrent(io, events.writeLoop, .{io});
+    try tasks.concurrent(io, events.writeLoop, .{ gpa, io });
     try tasks.concurrent(io, probeLoop, .{&monitor});
     try tasks.concurrent(io, netwatchLoop, .{&monitor});
     try tasks.concurrent(io, pruneTraceNames, .{ io, &tracer_state });
@@ -289,40 +289,32 @@ const Admission = struct {
         if (state == .closed) a.guard.connClosed(ipOf(peer));
     }
 
-    /// The phase a deadline cut this thread's last connection off in, set by
-    /// `onError` (which hears the timeout just before the summary).
-    threadlocal var timeout_err: ?anyerror = null;
-
     /// One finished connection. A deadline that cut it off: the summary
-    /// names the phase (`timeout_err`). Waiting for the next request on a
-    /// kept-alive connection is what browsers do, not an attack: only a
-    /// debug line.
+    /// names the phase. Waiting for the next request on a kept-alive
+    /// connection is what browsers do, not an attack: only a debug line.
     fn onConnClosed(_: ?*anyopaque, sum: http.Server.ConnSummary) void {
-        const err = timeout_err;
-        timeout_err = null;
         const peer = sum.peer orelse return;
         const ip = ipOf(peer);
         const ms: i64 = @intCast(@divTrunc(sum.duration_ns, std.time.ns_per_ms));
-        if (sum.end != .timed_out) {
+        const phase = sum.timeout_phase orelse {
             // Near the read timeout it was the timeout (reported below),
             // else the client closed it.
-            if (sum.requests == 0 and ms < read_timeout_ms - 500)
+            if (sum.end != .timed_out and sum.requests == 0 and ms < read_timeout_ms - 500)
                 _ = events.emit(.info, .conn, .conn, .of(ip), "action=closed reason=no_request requests=0 ms={d}", .{ms});
             return;
-        }
-        const phase: []const u8 = switch (err orelse error.Unknown) {
-            error.NoRequestTimeout => "no_request",
-            error.IdleTimeout => "idle",
-            error.HeadTimeout => "head",
-            error.BodyTimeout => "body",
-            error.WriteTimeout => "write",
-            error.ResponseTimeout => "response",
-            else => "read",
         };
-        if (err != null and err.? == error.IdleTimeout) {
-            _ = events.emit(.debug, .conn, .conn, .of(ip), "action=closed reason=idle requests={d} ms={d} phase={s}", .{ sum.requests, ms, phase });
+        // `idle` is the wait for a request: the first one of a connection
+        // that never sent any, or the next one on a kept-alive connection.
+        const name: []const u8 = switch (phase) {
+            .idle => if (sum.requests == 0) "no_request" else "idle",
+            .head => "head",
+            .body => "body",
+            .write => "write",
+        };
+        if (phase == .idle and sum.requests > 0) {
+            _ = events.emit(.debug, .conn, .conn, .of(ip), "action=closed reason=idle requests={d} ms={d} phase={s}", .{ sum.requests, ms, name });
         } else {
-            _ = events.emit(.warn, .conn, .conn, .of(ip), "action=closed reason=timeout requests={d} ms={d} phase={s}", .{ sum.requests, ms, phase });
+            _ = events.emit(.warn, .conn, .conn, .of(ip), "action=closed reason=timeout requests={d} ms={d} phase={s}", .{ sum.requests, ms, name });
         }
     }
 };
@@ -357,7 +349,7 @@ fn onError(_: ?*anyopaque, kind: http.Server.ErrorKind, err: ?anyerror, status: 
             });
         },
         .accept_failed => log.warn("accept: {t}", .{err orelse error.Unknown}),
-        .timed_out => Admission.timeout_err = err orelse error.Unknown,
+        .timed_out => {}, // the connection summary reports it, with its phase
     }
 }
 
@@ -960,13 +952,14 @@ test "routes: pages, HEAD, state with ETag and gzip, read-only, Host guard, body
         defer events.level = .err;
         access_log = .all;
         defer access_log = .refused;
-        events.captureForTest(true);
-        defer events.captureForTest(false);
+        var cap: events.TestCapture = undefined;
+        cap.start();
+        defer cap.stop();
         const chunk: [5000]u8 = @splat('x');
         var rec = try testRequest(&m, "POST /api/targets HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1388\r\n" ++ chunk ++ "\r\n0\r\n\r\n");
         defer rec.deinit();
         try testing.expectEqual(413, (try rec.only()).status);
-        const lines = events.takeForTest();
+        const lines = cap.take();
         try testing.expect(std.mem.indexOf(u8, lines, "status=200") == null);
         try testing.expect(std.mem.indexOf(u8, lines, "event=http") == null); // testRequest has no onError
     }

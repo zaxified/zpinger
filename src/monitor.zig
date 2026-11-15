@@ -1099,12 +1099,12 @@ fn writeMs(w: *Io.Writer, us: u32) Io.Writer.Error!void {
     if (us < 10_000) try w.print("{d:.2}", .{v}) else try w.print("{d:.1}", .{v});
 }
 
-/// The median of `v` (not empty; lower middle for an even count); reorders `v`.
+/// The median of `v` (not empty; the upper middle for an even count); reorders `v`.
 fn median(v: []u32) u32 {
     var wide: [history_len]u64 = undefined;
     std.debug.assert(v.len <= wide.len);
     for (v, wide[0..v.len]) |x, *w| w.* = x;
-    const m = latency_stats.median(wide[0..v.len]) orelse return 0;
+    const m = latency_stats.medianWith(wide[0..v.len], .upper) orelse return 0;
     return @intCast(m);
 }
 
@@ -2210,4 +2210,11 @@ test "DNS cache: the target keeps the address, its state follows the lookups, a 
     try testing.expectEqual(.ok, t.dns);
     try testing.expectEqual(0, t.addr_expires);
     try testing.expect(m.addressOf("example.org") == null);
+}
+
+test "summarize: the median of an even count is the upper middle" {
+    var rtts = [_]u32{ 4000, 1000, 3000, 2000 };
+    var sample: Sample = .{ .t = 1, .sent = 4 };
+    summarize(&sample, &rtts);
+    try testing.expectEqual(@as(u32, 3000), sample.rtt_us);
 }

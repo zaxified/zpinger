@@ -31,6 +31,7 @@ const Io = std.Io;
 const netaddr = @import("netaddr");
 const datefmt = @import("datefmt");
 const ratelimit = @import("ratelimit");
+const accesslog = @import("accesslog");
 
 /// Lines below this level are not written (`--log-level`).
 pub var level: std.log.Level = .info;
@@ -69,11 +70,15 @@ fn put(
         w.end = buf.len;
     };
     const line = w.buffered();
+    _ = sink_users.fetchAdd(1, .acquire);
     if (queue_on.load(.acquire)) {
-        if (enqueue(line)) return true;
+        const queued = sink.log(line);
+        _ = sink_users.fetchSub(1, .release);
+        if (queued) return true;
         _ = dropped.getPtr(class).fetchAdd(1, .monotonic);
         return false;
     }
+    _ = sink_users.fetchSub(1, .release);
     var sbuf: [256]u8 = undefined;
     const stderr = std.debug.lockStderr(&sbuf);
     defer std.debug.unlockStderr();
@@ -85,81 +90,46 @@ fn put(
 
 // ----- the queue ------------------------------------------------------------------
 
-/// Lines wait here for `writeLoop`, so that no thread ever blocks on
+/// Lines wait here for the writer task, so that no thread ever blocks on
 /// stderr: under systemd it is a socket to journald, and when journald
 /// falls behind a write blocks. The accept loop emits refusals, and a
 /// blocked write there would stop the server accepting anything. When the
 /// queue is full, lines are dropped and counted like rate-limited ones.
+/// (zig-libs accesslog `AsyncSink`.)
 const queue_size = 64 * 1024;
-var queue_buf: [queue_size]u8 = undefined;
-var queue_len: usize = 0;
-var queue_lock: std.atomic.Mutex = .unlocked;
-/// Bumped on every enqueue; `writeLoop` sleeps on it.
-var queue_seq: std.atomic.Value(u32) = .init(0);
+var sink: accesslog.AsyncSink = undefined;
 var queue_on: std.atomic.Value(bool) = .init(false);
-/// What `writeLoop` writes out, taken from the queue in one piece.
-/// Guarded by the stderr lock (`flushQueue`).
-var out_buf: [queue_size]u8 = undefined;
+/// Threads inside `sink.log`: `stopQueue` waits for them before it frees
+/// the sink.
+var sink_users: std.atomic.Value(u32) = .init(0);
 
-// zig-libs request: accesslog — AsyncSink (non-blocking, drop-counted) exists, but
-// log() returns void and dropped() is one total, so a drop cannot be attributed
-// to a rate-limit Class (the `event=log action=dropped class=` line); and
-// writeLogfmtValue has no always-quote / \xNN / truncation-marker mode, so
-// `Quoted` (doc/security-log.md, a parser contract) cannot move to it.
-fn enqueue(line: []const u8) bool {
-    {
-        while (!queue_lock.tryLock()) std.atomic.spinLoopHint();
-        defer queue_lock.unlock();
-        if (queue_size - queue_len < line.len) return false;
-        @memcpy(queue_buf[queue_len..][0..line.len], line);
-        queue_len += line.len;
-    }
-    _ = queue_seq.fetchAdd(1, .release);
-    std.Options.debug_io.futexWake(u32, &queue_seq.raw, 1);
-    return true;
-}
-
-/// Takes what is queued into `out_buf`; the caller holds the stderr lock.
-fn take() []const u8 {
-    while (!queue_lock.tryLock()) std.atomic.spinLoopHint();
-    defer queue_lock.unlock();
-    const n = queue_len;
-    @memcpy(out_buf[0..n], queue_buf[0..n]);
-    queue_len = 0;
-    return out_buf[0..n];
-}
-
-/// Writes out what is queued; returns whether there was anything.
-fn flushQueue() bool {
-    var sbuf: [256]u8 = undefined;
-    const stderr = std.debug.lockStderr(&sbuf);
-    defer std.debug.unlockStderr();
-    const lines = take();
-    if (lines.len == 0) return false;
-    const sw = &stderr.file_writer.interface;
-    sw.writeAll(lines) catch {};
-    sw.flush() catch {};
-    return true;
+/// Starts the queue and its writer task; from now on `put` queues lines for
+/// `w`. Without room for the queue (or a task) lines keep going straight to
+/// stderr.
+fn startQueue(gpa: std.mem.Allocator, io: Io, w: *Io.Writer) void {
+    sink.init(gpa, io, w, .{ .max_bytes = queue_size, .max_lines = 4096 }) catch return;
+    queue_on.store(true, .release);
 }
 
 /// Writes out what is queued; from now on lines go straight to stderr.
-/// Callable from any thread (before an exit).
+/// Callable from any thread (before an exit), and twice.
 pub fn stopQueue() void {
-    queue_on.store(false, .release);
-    _ = flushQueue();
+    if (!queue_on.swap(false, .acq_rel)) return;
+    while (sink_users.load(.acquire) != 0) std.atomic.spinLoopHint();
+    sink.deinit(); // drains
 }
+
+var stderr_buf: [4096]u8 = undefined;
+var stderr_writer: Io.File.Writer = undefined;
 
 /// Writes the queued lines to stderr until canceled; while it runs, no
 /// log call writes stderr itself. Lines queued at cancelation are written
 /// before it returns, later ones go straight to stderr again.
-pub fn writeLoop(io: Io) Io.Cancelable!void {
-    queue_on.store(true, .release);
+pub fn writeLoop(gpa: std.mem.Allocator, io: Io) Io.Cancelable!void {
+    stderr_writer = Io.File.stderr().writerStreaming(io, &stderr_buf);
+    startQueue(gpa, io, &stderr_writer.interface);
     defer stopQueue();
-    while (true) {
-        const seen = queue_seq.load(.acquire);
-        if (flushQueue()) continue;
-        try io.futexWait(u32, &queue_seq.raw, seen);
-    }
+    while (true) try io.sleep(.fromSeconds(3600), .awake);
 }
 
 fn writeLine(w: *Io.Writer, comptime lvl: std.log.Level, scope: []const u8, comptime format: []const u8, args: anytype) Io.Writer.Error!void {
@@ -272,16 +242,10 @@ pub fn quote(s: []const u8) Quoted {
 pub const Quoted = struct {
     s: []const u8,
 
+    /// Always quoted, every byte outside printable ASCII as `\xNN`, cut at
+    /// `max_value_len` and marked (zig-libs accesslog `writeLogfmtValue`).
     pub fn format(q: Quoted, w: *Io.Writer) Io.Writer.Error!void {
-        try w.writeByte('"');
-        const cut = q.s.len > max_value_len;
-        for (q.s[0..@min(q.s.len, max_value_len)]) |c| switch (c) {
-            '"', '\\' => try w.print("\\{c}", .{c}),
-            0x20...0x21, 0x23...0x5b, 0x5d...0x7e => try w.writeByte(c),
-            else => try w.print("\\x{x:0>2}", .{c}),
-        };
-        if (cut) try w.writeAll("...");
-        try w.writeByte('"');
+        try accesslog.writeLogfmtValue(w, q.s, .{ .quote = .always, .escape = .hex_x, .max_len = max_value_len, .cut_marker = "..." });
     }
 };
 
@@ -366,16 +330,50 @@ pub fn flushDropped() void {
     }
 }
 
-/// Tests: queue lines instead of writing them, for `takeForTest`.
-pub fn captureForTest(on: bool) void {
-    queue_len = 0;
-    queue_on.store(on, .release);
-}
+/// Tests: a destination for the queue that keeps what it gets and can be
+/// held shut (the writer task then stalls, as on a journal that fell behind).
+pub const TestCapture = struct {
+    interface: Io.Writer,
+    out: std.ArrayList(u8) = .empty,
+    open: std.atomic.Value(bool) = .init(true),
+    /// Bytes at the front of `out` that `take` already returned.
+    served: usize = 0,
 
-/// Tests: the lines queued since the last call.
-pub fn takeForTest() []const u8 {
-    return take();
-}
+    pub fn start(c: *TestCapture) void {
+        c.* = .{ .interface = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} } };
+        startQueue(testing.allocator, testing.io, &c.interface);
+    }
+
+    /// Writes out the queue; the capture is closed after this.
+    pub fn stop(c: *TestCapture) void {
+        c.open.store(true, .release);
+        stopQueue();
+        c.out.deinit(testing.allocator);
+    }
+
+    /// The lines written since the last call (waits for the writer; open it first).
+    pub fn take(c: *TestCapture) []const u8 {
+        sink.flush();
+        // What the last call returned is dropped now, not before it is read
+        // (clearing poisons the memory in safe builds).
+        c.out.replaceRange(testing.allocator, 0, c.served, &.{}) catch unreachable;
+        c.served = c.out.items.len;
+        return c.out.items;
+    }
+
+    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const c: *TestCapture = @alignCast(@fieldParentPtr("interface", w));
+        while (!c.open.load(.acquire)) std.Thread.yield() catch {};
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |d| {
+            c.out.appendSlice(testing.allocator, d) catch return error.WriteFailed;
+            n += d.len;
+        }
+        const last = data[data.len - 1];
+        for (0..splat) |_| c.out.appendSlice(testing.allocator, last) catch return error.WriteFailed;
+        return n + last.len * splat;
+    }
+};
 
 /// Calls `flushDropped` every `flush_interval_s` until canceled.
 pub fn flushLoop(io: Io) Io.Cancelable!void {
@@ -414,25 +412,58 @@ test "event line: kind, client, peer only when it differs" {
 }
 
 test "queue: never blocks; a full queue drops and counts, the report waits for room" {
-    captureForTest(true);
-    defer captureForTest(false);
+    var cap: TestCapture = undefined;
+    cap.start();
+    defer cap.stop();
     _ = dropped.getPtr(.system).swap(0, .monotonic);
     try testing.expect(emit(.warn, .log, .system, null, "x={d}", .{1}));
-    try testing.expect(std.mem.endsWith(u8, takeForTest(), "event=log x=1\n"));
+    try testing.expect(std.mem.endsWith(u8, cap.take(), "event=log x=1\n"));
+    // The destination stalls: lines queue up to the bound, then are dropped.
+    cap.open.store(false, .release);
     const long: [3000]u8 = @splat('a');
-    try testing.expect(emit(.warn, .log, .system, null, "{s}", .{&long}));
-    const line_len = takeForTest().len;
     var queued: usize = 0;
-    while (emit(.warn, .log, .system, null, "{s}", .{&long})) queued += 1;
-    try testing.expectEqual(queue_size / line_len, queued);
-    while (emit(.warn, .log, .system, null, "x", .{})) {} // the rest, to the last byte that fits
+    while (emit(.warn, .log, .system, null, "{s}", .{&long})) : (queued += 1) try testing.expect(queued < 100);
+    try testing.expect(queued >= queue_size / 4000);
+    try testing.expectEqual(1, dropped.getPtr(.system).load(.monotonic));
+    flushDropped(); // no room: kept, plus the report's own drop
     try testing.expectEqual(2, dropped.getPtr(.system).load(.monotonic));
-    flushDropped(); // no room (the report is longer than "x"): kept, plus the report itself
-    try testing.expectEqual(3, dropped.getPtr(.system).load(.monotonic));
-    _ = takeForTest();
+    cap.open.store(true, .release);
+    _ = cap.take();
     flushDropped();
-    try testing.expect(std.mem.endsWith(u8, takeForTest(), "action=dropped class=system count=3\n"));
+    try testing.expect(std.mem.endsWith(u8, cap.take(), "action=dropped class=system count=2\n"));
     try testing.expectEqual(0, dropped.getPtr(.system).load(.monotonic));
+}
+
+test "quote: byte for byte what the own escaper wrote before zig-libs writeLogfmtValue" {
+    // The escaper this module had (a log-parser contract, doc/security-log.md).
+    const Old = struct {
+        fn write(w: *Io.Writer, v: []const u8) Io.Writer.Error!void {
+            try w.writeByte('"');
+            const cut = v.len > max_value_len;
+            for (v[0..@min(v.len, max_value_len)]) |c| switch (c) {
+                '"', '\\' => try w.print("\\{c}", .{c}),
+                0x20...0x21, 0x23...0x5b, 0x5d...0x7e => try w.writeByte(c),
+                else => try w.print("\\x{x:0>2}", .{c}),
+            };
+            if (cut) try w.writeAll("...");
+            try w.writeByte('"');
+        }
+    };
+    var all: [256]u8 = undefined;
+    for (&all, 0..) |*b, i| b.* = @intCast(i);
+    const exact: [max_value_len]u8 = @splat('e');
+    const one_over: [max_value_len + 1]u8 = @splat('o');
+    const many: [3 * max_value_len]u8 = @splat('"'); // escapes double the size past the cut
+    const cases = [_][]const u8{ "", "plain", "a b", "\"", "\\", "a=b", "\n\r\t\x00\x1f\x7f", &all, "\xc3\xa9", &exact, &one_over, &many };
+    for (cases) |v| {
+        var a: [4096]u8 = undefined;
+        var b: [4096]u8 = undefined;
+        var wa: Io.Writer = .fixed(&a);
+        var wb: Io.Writer = .fixed(&b);
+        try Old.write(&wa, v);
+        try wb.print("{f}", .{quote(v)});
+        try testing.expectEqualStrings(wa.buffered(), wb.buffered());
+    }
 }
 
 test "time: RFC 3339 UTC" {
