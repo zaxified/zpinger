@@ -16,6 +16,7 @@ const Io = std.Io;
 const icmp = @import("icmp");
 const dns = @import("dns");
 const gzip = @import("http").gzip;
+const latency_stats = @import("latency-stats");
 const netaddr = @import("netaddr");
 const filestore = @import("filestore");
 const events = @import("events.zig");
@@ -1098,10 +1099,13 @@ fn writeMs(w: *Io.Writer, us: u32) Io.Writer.Error!void {
     if (us < 10_000) try w.print("{d:.2}", .{v}) else try w.print("{d:.1}", .{v});
 }
 
-/// Sorts `v` (not empty) and returns its median.
+/// The median of `v` (not empty; lower middle for an even count); reorders `v`.
 fn median(v: []u32) u32 {
-    std.mem.sortUnstable(u32, v, {}, std.sort.asc(u32));
-    return v[v.len / 2];
+    var wide: [history_len]u64 = undefined;
+    std.debug.assert(v.len <= wide.len);
+    for (v, wide[0..v.len]) |x, *w| w.* = x;
+    const m = latency_stats.median(wide[0..v.len]) orelse return 0;
+    return @intCast(m);
 }
 
 /// Fills `sample.recv`, `rtt_us` (median) and `jitter_us` from the replies'

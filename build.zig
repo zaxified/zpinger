@@ -30,6 +30,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "filestore", .module = zig_libs.module("filestore") },
             .{ .name = "http", .module = zig_libs.module("http") },
             .{ .name = "icmp", .module = zig_libs.module("icmp") },
+            .{ .name = "latency-stats", .module = zig_libs.module("latency-stats") },
             .{ .name = "netaddr", .module = zig_libs.module("netaddr") },
             .{ .name = "netlink", .module = zig_libs.module("netlink") },
             .{ .name = "ratelimit", .module = zig_libs.module("ratelimit") },

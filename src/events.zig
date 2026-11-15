@@ -351,7 +351,7 @@ pub fn keyOf(ip: netaddr.Ip) [16]u8 {
     const u = ip.unmap();
     return switch (u) {
         .v4 => u.as16(),
-        .v6 => (u.prefix(64) orelse unreachable).network().as16(), // 64 <= 128
+        .v6 => u.key(64),
     };
 }
 
