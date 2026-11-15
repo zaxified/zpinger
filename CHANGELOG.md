@@ -34,6 +34,12 @@ and these entries come from zig-fping's CHANGELOG.md.
   the local resolver. A lookup that keeps failing backs off exponentially
   (1 to 60 minutes) instead of repeating every minute.
 
+- **A trace shares hop names and follows its target's address.** Reverse-DNS
+  names are cached for every trace (5 minutes, failures backing off 1 to 60
+  minutes, freed once expired, at most 4096), instead of each trace asking
+  again. A trace goes where the probing goes: after a move to the other
+  family it starts over at the new address.
+
 ## 0.3.0 (2026-11-14)
 
 - **A problem is judged by the median jitter**, not the mean: 1 % packet

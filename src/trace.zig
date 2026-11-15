@@ -22,7 +22,14 @@
 //!
 //! Hop names come from reverse DNS (PTR) on a second task per session, one
 //! lookup at a time, so a slow resolver never holds up a round
-//! (`Tracer.names = false`, `--trace-names off`, turns it off).
+//! (`Tracer.names = false`, `--trace-names off`, turns it off). Every
+//! session shares one cache of them (`NameCache`), kept like a target's
+//! address: an answer for its TTL, a failure for a backoff growing to an
+//! hour, freed once expired.
+//!
+//! A trace goes to the address the probing cycle uses for its host, and
+//! follows it: when the cycle moves the name to the other family (the host
+//! lost its IPv6 route, or got it back), the trace starts over there.
 //!
 //! Locking: `Tracer.mutex` guards the session table; each `Session.mutex`
 //! guards that session's snapshot, which the engine of its family fills.
@@ -32,8 +39,9 @@ const Io = std.Io;
 const traceroute = @import("traceroute");
 const netaddr = @import("netaddr");
 const dns = @import("dns");
-const resolve = @import("monitor.zig").resolve;
-const Monitor = @import("monitor.zig").Monitor;
+const monitor = @import("monitor.zig");
+const resolve = monitor.resolve;
+const Monitor = monitor.Monitor;
 const events = @import("events.zig");
 
 const log = std.log.scoped(.trace);
@@ -113,6 +121,8 @@ pub const Tracer = struct {
     limits: Limits = .writable,
     /// Look up hop names (reverse DNS).
     names: bool = true,
+    /// Hop names every session shares.
+    name_cache: NameCache = .{},
     mutex: Io.Mutex = .init,
     /// One session per host: every viewer of that host, through any target,
     /// reads the same measurement.
@@ -146,6 +156,13 @@ pub const Tracer = struct {
             d.* = null;
         };
         for (&t.engines) |*e| e.wait(t.io);
+        t.name_cache.deinit(t.gpa);
+    }
+
+    /// Frees the hop names whose time ran out (`main` calls it once a
+    /// minute, whether a trace runs or not).
+    pub fn pruneNames(t: *Tracer) void {
+        t.name_cache.prune(t.io, t.gpa, t.clock());
     }
 
     /// `viewer` watches the trace of `host`: joins the running session, or
@@ -514,6 +531,51 @@ fn hopName(ptr: []const u8) ?[]const u8 {
     return name;
 }
 
+test "hop name cache: TTL, backoff for failures, freed when expired, bounded" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var c: NameCache = .{};
+    defer c.deinit(gpa);
+    const a = netaddr.parseIp("192.0.2.1").?;
+    const b = netaddr.parseIp("2001:db8::1").?;
+    const n = netaddr.parseIp("192.0.2.2").?;
+    var buf: [64]u8 = undefined;
+
+    try testing.expect(c.get(io, a, 100, &buf) == null); // nothing yet: look it up
+    c.put(io, gpa, a, 100, .{ .answer = .{ .name = "gw.example", .ttl_s = 30 } });
+    c.put(io, gpa, n, 100, .{ .answer = .{ .name = null, .ttl_s = 7200 } }); // no name: kept too
+    try testing.expectEqualStrings("gw.example", c.get(io, a, 159, &buf).?.name.?);
+    try testing.expect(c.get(io, a, 160, &buf) == null); // TTL 30 held at the 60 s floor
+    try testing.expect(c.get(io, n, 100 + 3599, &buf).?.name == null);
+    try testing.expect(c.get(io, n, 100 + 3600, &buf) == null); // at most an hour
+
+    // The same family rules for v6; failures back off 1, 2, 4 ... minutes.
+    c.put(io, gpa, b, 100, .failed);
+    try testing.expect(c.get(io, b, 159, &buf) != null);
+    try testing.expect(c.get(io, b, 160, &buf) == null);
+    c.put(io, gpa, b, 160, .failed);
+    try testing.expect(c.get(io, b, 279, &buf) != null);
+    try testing.expect(c.get(io, b, 280, &buf) == null);
+    c.put(io, gpa, b, 280, .{ .answer = .{ .name = "v6.example", .ttl_s = 600 } });
+    try testing.expectEqual(0, c.map.get(NameCache.key(b)).?.fails);
+
+    // Expired entries are freed (the allocator would report a leak otherwise).
+    c.prune(io, gpa, 800);
+    try testing.expectEqual(2, c.map.count()); // a (till 160) freed; b till 880, n till 3700
+    c.prune(io, gpa, 100 + 3600);
+    try testing.expectEqual(0, c.map.count());
+
+    // Full: a new address is not kept, an expired one makes room.
+    for (0..max_cached_names) |i| {
+        const ip: netaddr.Ip = .{ .v6 = std.mem.toBytes(std.mem.nativeToBig(u128, i + 1)) };
+        c.put(io, gpa, ip, 1000, .{ .answer = .{ .name = "x", .ttl_s = 60 } });
+    }
+    c.put(io, gpa, a, 1000, .{ .answer = .{ .name = "gw.example", .ttl_s = 60 } });
+    try testing.expect(c.get(io, a, 1000, &buf) == null);
+    c.put(io, gpa, a, 1060, .{ .answer = .{ .name = "gw.example", .ttl_s = 60 } });
+    try testing.expect(c.get(io, a, 1060, &buf) != null);
+}
+
 test "hop names: host names only" {
     try testing.expectEqualStrings("gw-1.example_net.org", hopName("gw-1.example_net.org.").?);
     for ([_][]const u8{ "", ".", "a\nb.example", "\x1b[2Jx.example", "\xff\xfe.example", "a b.example", "a\"b.example" }) |bad|
@@ -532,6 +594,111 @@ const Name = struct {
         return if (n.len == 0) null else n.buf[0..n.len];
     }
 };
+
+/// Hop names kept between lookups and shared by every session, keyed by
+/// address; the same rules as a target's address (`monitor.zig`): a name
+/// is kept for its answer's TTL (within 1 minute and 1 hour), a failed
+/// lookup is retried after `monitor.backoffS` of the failures in a row,
+/// and an entry past its time is freed by `prune`. Bounded: with
+/// `max_cached_names` entries, a new one is not kept.
+const NameCache = struct {
+    mutex: Io.Mutex = .init,
+    map: std.AutoHashMapUnmanaged(Key, Entry) = .empty,
+
+    const Key = [17]u8; // family, then the address as 16 bytes
+    const Entry = struct {
+        /// Awake-clock seconds until which this entry stands.
+        expires: i64,
+        /// Failed lookups in a row (no answer); 0 after an answer.
+        fails: u8 = 0,
+        /// The name; null when the address has none or the lookup failed.
+        name: ?[]u8 = null,
+    };
+    pub const Hit = struct { name: ?[]const u8 };
+
+    fn key(ip: netaddr.Ip) Key {
+        var k: Key = undefined;
+        k[0] = if (ip == .v4) 4 else 6;
+        k[1..].* = ip.as16();
+        return k;
+    }
+
+    /// The cached outcome for `ip`, copied into `buf`; null when there is
+    /// none or it expired (a lookup is due).
+    fn get(c: *NameCache, io: Io, ip: netaddr.Ip, now: i64, buf: []u8) ?Hit {
+        c.mutex.lockUncancelable(io);
+        defer c.mutex.unlock(io);
+        const e = c.map.get(key(ip)) orelse return null;
+        if (now >= e.expires) return null;
+        const name = e.name orelse return .{ .name = null };
+        const len = @min(name.len, buf.len);
+        @memcpy(buf[0..len], name[0..len]);
+        return .{ .name = buf[0..len] };
+    }
+
+    /// Keeps a lookup's outcome: `name` (null: none) for `ttl_s`, or a
+    /// failure (`failed`) for the backoff of the failures so far.
+    fn put(c: *NameCache, io: Io, gpa: std.mem.Allocator, ip: netaddr.Ip, now: i64, outcome: union(enum) { answer: struct { name: ?[]const u8, ttl_s: ?i64 }, failed }) void {
+        c.mutex.lockUncancelable(io);
+        defer c.mutex.unlock(io);
+        const k = key(ip);
+        const prev_fails: u8 = if (c.map.get(k)) |e| e.fails else 0;
+        var entry: Entry = switch (outcome) {
+            .answer => |a| .{ .expires = now + std.math.clamp(a.ttl_s orelse monitor.default_ttl_s, monitor.min_ttl_s, monitor.max_ttl_s) },
+            .failed => .{ .expires = now + monitor.backoffS(prev_fails), .fails = prev_fails +| 1 },
+        };
+        if (outcome == .answer) if (outcome.answer.name) |n| {
+            entry.name = gpa.dupe(u8, n) catch return;
+        };
+        if (!c.map.contains(k) and c.map.count() >= max_cached_names) {
+            c.pruneLocked(gpa, now);
+            if (c.map.count() >= max_cached_names) {
+                if (entry.name) |n| gpa.free(n);
+                return;
+            }
+        }
+        const gop = c.map.getOrPut(gpa, k) catch {
+            if (entry.name) |n| gpa.free(n);
+            return;
+        };
+        if (gop.found_existing) if (gop.value_ptr.name) |old| gpa.free(old);
+        gop.value_ptr.* = entry;
+    }
+
+    fn prune(c: *NameCache, io: Io, gpa: std.mem.Allocator, now: i64) void {
+        c.mutex.lockUncancelable(io);
+        defer c.mutex.unlock(io);
+        c.pruneLocked(gpa, now);
+    }
+
+    fn pruneLocked(c: *NameCache, gpa: std.mem.Allocator, now: i64) void {
+        var it = c.map.iterator();
+        var gone: [64]Key = undefined;
+        while (true) {
+            var n: usize = 0;
+            it = c.map.iterator();
+            while (it.next()) |e| if (now >= e.value_ptr.expires) {
+                gone[n] = e.key_ptr.*;
+                n += 1;
+                if (n == gone.len) break;
+            };
+            for (gone[0..n]) |k| if (c.map.fetchRemove(k)) |kv| if (kv.value.name) |name| gpa.free(name);
+            if (n < gone.len) break;
+        }
+        // Give the memory back once the cache is empty.
+        if (c.map.count() == 0) c.map.clearAndFree(gpa);
+    }
+
+    fn deinit(c: *NameCache, gpa: std.mem.Allocator) void {
+        var it = c.map.valueIterator();
+        while (it.next()) |e| if (e.name) |n| gpa.free(n);
+        c.map.deinit(gpa);
+    }
+};
+
+/// Hop names kept at once: 16 traces of 30 hops with 4 responders each is
+/// 1920; more are not cached (looked up again by the next trace).
+const max_cached_names = 4096;
 
 const Session = struct {
     tracer: *Tracer,
@@ -585,15 +752,25 @@ const Session = struct {
             error.Canceled, error.OutOfMemory => |e| return e,
             else => return .unresolved,
         };
-        const dest = addr.toIp();
+        var dest = addr.toIp();
         s.mutex.lockUncancelable(io);
         s.address = dest;
         s.mutex.unlock(io);
-        const engine = &s.tracer.engines[if (dest == .v4) 0 else 1];
+        var engine = &s.tracer.engines[if (dest == .v4) 0 else 1];
         try engine.register(s);
-        defer engine.unregister(s);
+        defer engine.unregister(s); // the engine of the last address
         while (true) {
             if (s.stop.load(.monotonic)) return .stopped;
+            // The cycle moved the host to another address (another family
+            // after a network change): the trace starts over there.
+            if (s.tracer.addresses) |m| if (m.addressOf(s.host)) |a| if (!a.toIp().eql(dest)) {
+                engine.unregister(s); // no record from it after this
+                dest = a.toIp();
+                s.restartAt(dest);
+                engine = &s.tracer.engines[if (dest == .v4) 0 else 1];
+                try engine.register(s);
+                log.info("trace of {s} moved to {f}", .{ s.host, dest });
+            };
             const failure = s.failure.load(.acquire);
             if (failure != .running) return failure;
             const now = s.tracer.clock();
@@ -602,6 +779,17 @@ const Session = struct {
             if (now - s.started > limits.max_age_s) return .max_age;
             io.sleep(.fromMilliseconds(session_poll_ms), .awake) catch return .stopped;
         }
+    }
+
+    /// A new destination: the path and its statistics start over.
+    fn restartAt(s: *Session, dest: netaddr.Ip) void {
+        const io = s.tracer.io;
+        s.mutex.lockUncancelable(io);
+        defer s.mutex.unlock(io);
+        s.address = dest;
+        s.hop_n = 0;
+        s.rounds = 0;
+        s.reached = false;
     }
 
     /// The engine's copy of this session's member after a round.
@@ -641,6 +829,19 @@ const Session = struct {
         return null;
     }
 
+    /// Records the name (null: none) of queued address `i`.
+    fn setName(s: *Session, i: usize, name: ?[]const u8) void {
+        const io = s.tracer.io;
+        s.mutex.lockUncancelable(io);
+        defer s.mutex.unlock(io);
+        const n = &s.names[i];
+        n.state = .done;
+        const v = name orelse return;
+        const len = @min(v.len, n.buf.len);
+        @memcpy(n.buf[0..len], v[0..len]);
+        n.len = @intCast(len);
+    }
+
     /// The names task: looks up queued addresses one at a time until the
     /// trace cancels it.
     fn lookupNames(s: *Session) void {
@@ -658,23 +859,26 @@ const Session = struct {
                 io.sleep(.fromMilliseconds(name_poll_ms), .awake) catch return;
                 continue;
             };
-            // Any failure (timeout, no server) leaves the address nameless;
-            // it is not retried, the plain address is what mtr shows too.
+            const cache = &s.tracer.name_cache;
+            var buf: [dns.message.max_name_text_len]u8 = undefined;
+            if (cache.get(io, ip, s.tracer.clock(), &buf)) |hit| {
+                s.setName(i, hit.name);
+                continue;
+            }
+            // A failure (timeout, no server) leaves the address nameless,
+            // the plain address is what mtr shows too; the cache tries it
+            // again after a backoff.
             const found: ?[]const []const u8 = resolver.reverse(ip) catch |err| switch (err) {
                 error.Canceled => return,
                 else => null,
             };
             defer if (found) |f| resolver.freeNames(f);
-            s.mutex.lockUncancelable(io);
-            defer s.mutex.unlock(io);
-            const n = &s.names[i];
-            n.state = .done;
-            if (found) |f| if (f.len > 0) {
-                const name = hopName(f[0]) orelse continue;
-                const len = @min(name.len, n.buf.len);
-                @memcpy(n.buf[0..len], name[0..len]);
-                n.len = @intCast(len);
-            };
+            const name: ?[]const u8 = if (found) |f| (if (f.len > 0) hopName(f[0]) else null) else null;
+            // zig-libs request: dns — `reverse` returns no TTL, so a PTR
+            // answer is kept `monitor.default_ttl_s` (as an answer without
+            // a TTL is) until a TTL-carrying reverse lookup exists.
+            cache.put(io, s.tracer.gpa, ip, s.tracer.clock(), if (found == null) .failed else .{ .answer = .{ .name = name, .ttl_s = null } });
+            s.setName(i, name);
         }
     }
 

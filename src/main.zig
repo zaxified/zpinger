@@ -221,6 +221,7 @@ pub fn main(init: std.process.Init) !void {
     try tasks.concurrent(io, events.writeLoop, .{io});
     try tasks.concurrent(io, probeLoop, .{&monitor});
     try tasks.concurrent(io, netwatchLoop, .{&monitor});
+    try tasks.concurrent(io, pruneTraceNames, .{ io, &tracer_state });
     try tasks.concurrent(io, events.flushLoop, .{io});
     if (stop_fd) |fd| try tasks.concurrent(io, stopOnSignal, .{ &monitor, fd });
     server.serve() catch |err| fatal(io, "serving failed: {t}", .{err});
@@ -423,6 +424,15 @@ fn print(io: Io, comptime fmt: []const u8, args: anytype) void {
 
 fn probeLoop(monitor: *Monitor) void {
     monitor.loop() catch {}; // canceled at shutdown
+}
+
+/// Once a minute the hop names whose time ran out are freed, whether a
+/// trace runs or not.
+fn pruneTraceNames(io: Io, t: *Tracer) void {
+    while (true) {
+        io.sleep(.fromSeconds(60), .awake) catch return; // canceled at shutdown
+        t.pruneNames();
+    }
 }
 
 fn netwatchLoop(monitor: *Monitor) void {

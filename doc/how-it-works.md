@@ -43,7 +43,17 @@ queue), so it needs no capability either. Hops are named by reverse DNS
 (PTR, through the system resolver, one lookup at a time beside the trace so
 a slow resolver never delays a round); a PTR answer that is not a host name
 (letters, digits, `-`, `_`, `.`) counts as no name, and `--trace-names off`
-shows only the addresses.
+shows only the addresses. Hop names are kept like a target's address: every
+trace shares them, an answer stands 5 minutes (within 1 minute and 1 hour; the
+PTR record's own TTL once zig-libs reports it), a lookup that failed is tried
+again after 1, 2, 4 … 60 minutes, and a name past its time is freed within a
+minute, traces running or not (at most 4096 kept).
+
+The trace goes to the address the probing uses for the target and follows it:
+when the probing moves a name to the other family (the host lost its IPv6
+route, or got it back), the trace starts over at the new address. While the
+destination does not answer, the table ends one hop after the last that did,
+shown as "no answer", as mtr shows `???`.
 
 A trace measures and changes nothing, so a read-only demo offers it too. It
 does show every visitor the path out of your server: your gateway and your

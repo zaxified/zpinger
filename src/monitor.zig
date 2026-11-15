@@ -1209,9 +1209,9 @@ const max_lookups = 16;
 /// An answer is kept for its TTL, within these bounds (seconds): a name is
 /// looked up at most once a minute, at least once an hour. An answer
 /// without a TTL (/etc/hosts) is kept `default_ttl_s`.
-const min_ttl_s = 60;
-const max_ttl_s = 3600;
-const default_ttl_s = 300;
+pub const min_ttl_s = 60;
+pub const max_ttl_s = 3600;
+pub const default_ttl_s = 300;
 /// After a failed lookup, the next try (the stale address is probed meanwhile).
 const retry_s = 60;
 /// After a network change, a name whose address still has a route is
@@ -1222,7 +1222,7 @@ const net_spread_s = 600;
 
 /// How long after `fails` failed lookups in a row the next is tried:
 /// `retry_s`, doubled each time, at most `max_ttl_s` (1, 2, 4 … 60 minutes).
-fn backoffS(fails: u8) i64 {
+pub fn backoffS(fails: u8) i64 {
     return @min(@as(i64, retry_s) << @min(fails, 6), max_ttl_s);
 }
 
