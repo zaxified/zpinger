@@ -19,6 +19,7 @@ const Tracer = @import("trace.zig").Tracer;
 const trace = @import("trace.zig");
 const netaddr = @import("netaddr");
 const ratelimit = @import("ratelimit");
+const SecurityHeaders = @import("security-headers").SecurityHeaders;
 const events = @import("events.zig");
 const netwatch = @import("netwatch.zig");
 
@@ -202,7 +203,7 @@ pub fn main(init: std.process.Init) !void {
         // connection: this bounds how long one connection keeps its thread.
         .max_requests_per_conn = 100,
         .server_name = null,
-        .error_headers = &security_headers,
+        .error_headers = security_headers,
     });
     defer server.deinit();
     server.bind() catch |err|
@@ -499,13 +500,14 @@ fn faviconIn(comptime color: []const u8) []const u8 {
         "\" opacity=\".25\"/><circle cx=\"16\" cy=\"16\" r=\"9\" fill=\"" ++ color ++ "\"/></svg>";
 }
 
-/// Sent with every response. The page loads nothing from other origins and
-/// has no inline script, so the policy can be strict.
-const security_headers = [_]http.Header{
-    .{ .name = "content-security-policy", .value = "default-src 'self'; frame-ancestors 'none'" },
-    .{ .name = "x-content-type-options", .value = "nosniff" },
-    .{ .name = "referrer-policy", .value = "no-referrer" },
-};
+/// Sent with every response (zig-libs security-headers, its defaults): the
+/// page loads nothing from other origins and has no inline script, so the
+/// policy can be strict. No HSTS: zpinger speaks plain HTTP, the proxy in
+/// front that adds TLS owns it.
+const security_headers = SecurityHeaders.staticHeaders(.{
+    .hsts = null,
+    .content_security_policy = "default-src 'self'; frame-ancestors 'none'",
+});
 
 const Request = http.Server.Request;
 const ResponseWriter = http.Server.ResponseWriter;
@@ -834,7 +836,7 @@ fn sendState(monitor: *Monitor, req: *Request, rw: *ResponseWriter) !void {
     // A 304 names the representation this client gets.
     if (since == null) {
         const current = etagOf(&buf, monitor.stateTag(), null, accepts_gzip);
-        if (ifNoneMatch(req, current))
+        if (notModified(req, current))
             return respond(rw, "", .{ .status = .not_modified, .cache_control = "no-cache", .etag = current, .vary = true });
     }
     const state = try monitor.state(since);
@@ -857,22 +859,17 @@ fn etagOf(buf: *[64]u8, tag: StateTag, since: ?i64, gzip: bool) []const u8 {
     return std.mem.print(buf, "\"{d}-{d}{s}{s}\"", .{ tag.version, tag.end, delta, if (gzip) "-gzip" else "" }) catch unreachable;
 }
 
-/// Whether an If-None-Match header lists `etag` (a weak comparison, as
-/// RFC 9110 asks for it). Also accepted: a suffix after the tag
-/// (`"1-2-gzip"`), as a compressing proxy may rewrite the ETag it passes on.
-fn ifNoneMatch(req: *const Request, etag: []const u8) bool {
-    const bare = etag[1 .. etag.len - 1];
-    var headers = req.iterateHeaders();
-    while (headers.next()) |h| {
-        if (!std.ascii.eqlIgnoreCase(h.name, "if-none-match")) continue;
-        var tags = std.mem.tokenizeAny(u8, h.value, ", ");
-        while (tags.next()) |raw| {
-            const t = std.mem.trim(u8, if (std.mem.startsWith(u8, raw, "W/")) raw[2..] else raw, "\"");
-            if (std.mem.eql(u8, t, bare)) return true;
-            if (std.mem.startsWith(u8, t, bare) and t[bare.len] == '-') return true;
-        }
-    }
-    return false;
+/// Whether the client's cached copy is current: `http.conditional`
+/// (RFC 9110 §13.2.2, If-None-Match by weak comparison). A compressing proxy
+/// in front passes the identity ETag on with `-gzip` appended, which is the
+/// spelling of the compressed representation here too, so that one counts.
+fn notModified(req: *const Request, etag: []const u8) bool {
+    const conditional = http.conditional;
+    if (conditional.evaluate(req.method, req, .{ .etag = etag }) == .not_modified) return true;
+    if (std.mem.endsWith(u8, etag, "-gzip\"")) return false;
+    var buf: [72]u8 = undefined;
+    const gzipped = std.mem.print(&buf, "{s}-gzip\"", .{etag[0 .. etag.len - 1]}) catch return false;
+    return conditional.evaluate(req.method, req, .{ .etag = gzipped }) == .not_modified;
 }
 
 const Response = struct {
@@ -934,7 +931,7 @@ pub fn testRequest(monitor: *Monitor, wire: []const u8) !http.httptest.Recording
         .context = monitor,
         .max_body_bytes = max_body_bytes,
         .server_name = null,
-        .error_headers = &security_headers,
+        .error_headers = security_headers,
     }, wire, .{});
 }
 

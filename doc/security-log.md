@@ -54,7 +54,7 @@ event=http client=198.51.100.7 peer=127.0.0.1 status=429 reason=trace_rate metho
 | `not_found`, `no_such_target`, `no_trace` | 404 | an unknown path (a scanner's signature), target or trace |
 | `bad_method` | 405 | a method the route does not take |
 | `too_many_targets`, `not_down` | 409 | the target list is full; an acknowledgement of a target that is not DOWN |
-| `trace_viewer_limit`, `trace_rate` | 429 | the client watches 2 traces already; it started 4, or everybody 10, in the last minute |
+| `trace_viewer_limit`, `trace_rate` | 429 | the client watches 2 traces already; it started 4, or everybody 10, within about a minute (token buckets refilled evenly over the minute) |
 | `trace_cap`, `trace_disabled` | 503, 403 | `--trace-max` traces running; traces are off |
 | `body_aborted` | 500 | the client hung up inside its request body (nobody reads this status) |
 | `write_aborted` | 0 (or what went out) | the client stopped reading the answer: it hung up, or the write deadline cut a slow reader off (a `conn action=closed reason=timeout phase=write` line follows) |

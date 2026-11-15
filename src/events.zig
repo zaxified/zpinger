@@ -29,6 +29,7 @@
 const std = @import("std");
 const Io = std.Io;
 const netaddr = @import("netaddr");
+const datefmt = @import("datefmt");
 const ratelimit = @import("ratelimit");
 
 /// Lines below this level are not written (`--log-level`).
@@ -175,14 +176,10 @@ fn writeLine(w: *Io.Writer, comptime lvl: std.log.Level, scope: []const u8, comp
 
 /// RFC 3339, UTC, whole seconds.
 fn writeTime(w: *Io.Writer, unix_s: i64) Io.Writer.Error!void {
-    const secs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@max(unix_s, 0)) };
-    const year_day = secs.getEpochDay().calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-    const day = secs.getDaySeconds();
-    try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        year_day.year,         month_day.month.numeric(), @as(u32, month_day.day_index) + 1,
-        day.getHoursIntoDay(), day.getMinutesIntoHour(),  day.getSecondsIntoMinute(),
-    });
+    var buf: [datefmt.rfc3339_max_len]u8 = undefined;
+    // A clock outside years 0..9999 has no RFC 3339 form: the epoch stands in.
+    const text = datefmt.bufRfc3339(&buf, datefmt.unixToParts(unix_s), 0) catch "1970-01-01T00:00:00Z";
+    try w.writeAll(text);
 }
 
 // ----- events ---------------------------------------------------------------------
@@ -371,11 +368,14 @@ fn admit(class: Class, who: ?Who) bool {
     return false;
 }
 
-/// The per-client key: the address, an IPv6 one cut to its /64.
-fn keyOf(ip: netaddr.Ip) [16]u8 {
-    var k = ip.as16();
-    if (ip.unmap() == .v6) @memset(k[8..], 0);
-    return k;
+/// The per-client key: the address (IPv4 as IPv4-mapped), an IPv6 one cut
+/// to its /64, the prefix one subscriber gets. Also a trace's viewer.
+pub fn keyOf(ip: netaddr.Ip) [16]u8 {
+    const u = ip.unmap();
+    return switch (u) {
+        .v4 => u.as16(),
+        .v6 => (u.prefix(64) orelse unreachable).network().as16(), // 64 <= 128
+    };
 }
 
 /// Reports what the rate limits dropped since the last call.

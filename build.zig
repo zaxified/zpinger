@@ -25,6 +25,7 @@ pub fn build(b: *std.Build) void {
         .strip = strip,
         .imports = &.{
             .{ .name = "abuseguard", .module = zig_libs.module("abuseguard") },
+            .{ .name = "datefmt", .module = zig_libs.module("datefmt") },
             .{ .name = "dns", .module = zig_libs.module("dns") },
             .{ .name = "filestore", .module = zig_libs.module("filestore") },
             .{ .name = "http", .module = zig_libs.module("http") },
@@ -32,6 +33,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "netaddr", .module = zig_libs.module("netaddr") },
             .{ .name = "netlink", .module = zig_libs.module("netlink") },
             .{ .name = "ratelimit", .module = zig_libs.module("ratelimit") },
+            .{ .name = "security-headers", .module = zig_libs.module("security-headers") },
             .{ .name = "traceroute", .module = zig_libs.module("traceroute") },
             .{ .name = "build_options", .module = options.createModule() },
         },

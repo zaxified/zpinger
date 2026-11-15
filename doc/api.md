@@ -101,7 +101,8 @@ back. A read-only instance answers `403` to all of them.
 
 `POST /api/targets/ID/trace` starts a trace of the target's host, or joins
 the running one: `202`. Refusals: `429` when this viewer watches 2 traces
-already or 10 traces started in the last minute, `503` when `--trace-max`
+already, started 4 within about a minute, or 10 traces were started within
+about a minute (token buckets, refilled evenly), `503` when `--trace-max`
 traces run, `403` when traces are off. Polling is watching: each `GET` keeps
 the trace running and counts against the viewer's 2. `DELETE` stops
 watching; the trace stops when its last viewer has. `404` when none runs.

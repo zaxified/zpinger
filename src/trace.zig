@@ -39,6 +39,7 @@ const Io = std.Io;
 const traceroute = @import("traceroute");
 const netaddr = @import("netaddr");
 const dns = @import("dns");
+const ratelimit = @import("ratelimit");
 const monitor = @import("monitor.zig");
 const resolve = monitor.resolve;
 const Monitor = monitor.Monitor;
@@ -95,6 +96,8 @@ pub const max_starts_per_min = 10;
 /// New sessions per minute for one viewer: starting and stopping in a loop
 /// must not use up everybody's `max_starts_per_min`.
 pub const max_viewer_starts_per_min = 4;
+const starts_config: ratelimit.TokenBucket.Config = .{ .rate_per_s = @as(f64, max_starts_per_min) / 60, .burst = max_starts_per_min };
+const viewer_starts_options: ratelimit.Options = .{ .rate_per_s = @as(f64, max_viewer_starts_per_min) / 60, .burst = max_viewer_starts_per_min, .max_keys = max_watches, .key = .forwarded_ip };
 /// Viewer-to-session watches kept at once (a full table refuses new viewers).
 const max_watches = 256;
 
@@ -104,9 +107,7 @@ const max_watches = 256;
 pub const Viewer = [16]u8;
 
 pub fn viewerOf(ip: netaddr.Ip) Viewer {
-    var v = ip.as16();
-    if (ip.unmap() == .v6) @memset(v[8..], 0);
-    return v;
+    return events.keyOf(ip);
 }
 
 const Watch = struct { viewer: Viewer, session: *Session, last_poll: i64 };
@@ -137,11 +138,10 @@ pub const Tracer = struct {
     /// Gives every session an identity the engines can check (a freed
     /// session's address may come back for the next one).
     serial: u64 = 0,
-    /// Start times of the last `max_starts_per_min` sessions (a ring).
-    starts: [max_starts_per_min]?i64 = @splat(null),
-    /// Who started them.
-    start_viewers: [max_starts_per_min]Viewer = undefined,
-    start_i: usize = 0,
+    /// New sessions, all viewers together and per viewer (`allowStart`);
+    /// set up by the first start.
+    starts: ?ratelimit.TokenBucket = null,
+    viewer_starts: ?ratelimit.Limiter = null,
 
     /// Stops every session and waits for their threads, then for the
     /// engines (each stops after its round once no session is left).
@@ -157,6 +157,7 @@ pub const Tracer = struct {
         };
         for (&t.engines) |*e| e.wait(t.io);
         t.name_cache.deinit(t.gpa);
+        if (t.viewer_starts) |*l| l.deinit();
     }
 
     /// Frees the hop names whose time ran out (`main` calls it once a
@@ -195,7 +196,7 @@ pub const Tracer = struct {
         }
         if (running_n >= t.max_sessions) return error.TooManyTraces;
         const slot = free orelse return error.TooManyTraces;
-        if (t.rateLimited(now) or t.viewerRateLimited(viewer, now)) return error.RateLimited;
+        if (!t.allowStart(viewer, t.clockNs())) return error.RateLimited;
 
         const s = try t.gpa.create(Session);
         errdefer t.gpa.destroy(s);
@@ -204,7 +205,6 @@ pub const Tracer = struct {
         errdefer t.gpa.free(s.host);
         s.future = try t.io.concurrent(Session.run, .{s});
         t.slots[slot] = s;
-        t.noteStart(viewer, now);
         t.watch(viewer, s, now) catch unreachable; // count and room checked above
     }
 
@@ -243,28 +243,16 @@ pub const Tracer = struct {
         return out.written();
     }
 
-    /// Whether `max_starts_per_min` sessions started in the last minute.
-    fn rateLimited(t: *const Tracer, now: i64) bool {
-        const oldest = t.starts[t.start_i] orelse return false;
-        return now - oldest < 60;
-    }
-
-    /// Whether `viewer` started `max_viewer_starts_per_min` sessions in the
-    /// last minute. The ring is enough: it holds every start of the last
-    /// minute that the global limit allowed.
-    fn viewerRateLimited(t: *const Tracer, viewer: Viewer, now: i64) bool {
-        var n: usize = 0;
-        for (t.starts, &t.start_viewers) |started, *v| {
-            const at = started orelse continue;
-            if (now - at < 60 and std.mem.eql(u8, v, &viewer)) n += 1;
-        }
-        return n >= max_viewer_starts_per_min;
-    }
-
-    fn noteStart(t: *Tracer, viewer: Viewer, now: i64) void {
-        t.starts[t.start_i] = now;
-        t.start_viewers[t.start_i] = viewer;
-        t.start_i = (t.start_i + 1) % max_starts_per_min;
+    /// Whether a new session may start now: at most `max_starts_per_min`
+    /// a minute in total and `max_viewer_starts_per_min` per viewer (token
+    /// buckets: the whole count at once, then refilled evenly over the
+    /// minute). The viewer's limit is asked first, so a viewer held back
+    /// takes nothing from everybody else. Under `mutex`.
+    fn allowStart(t: *Tracer, viewer: Viewer, now_ns: u64) bool {
+        if (t.viewer_starts == null) t.viewer_starts = .init(t.gpa, viewer_starts_options);
+        if (t.starts == null) t.starts = .full(starts_config, now_ns);
+        if (!t.viewer_starts.?.allowAt(&viewer, now_ns).allowed) return false;
+        return t.starts.?.allowAt(starts_config, now_ns).allowed;
     }
 
     /// The running session of `host`. Under `mutex`.
@@ -357,6 +345,10 @@ pub const Tracer = struct {
 
     fn clock(t: *const Tracer) i64 {
         return Io.Clock.awake.now(t.io).toSeconds();
+    }
+
+    fn clockNs(t: *const Tracer) u64 {
+        return @intCast(@max(Io.Clock.awake.now(t.io).toNanoseconds(), 0));
     }
 };
 
@@ -1073,34 +1065,34 @@ test "a refused viewer does not keep a session alive" {
 test "at most max_starts_per_min new sessions a minute" {
     var t: Tracer = .{ .gpa = testing.allocator, .io = testing.io };
     defer t.deinit();
-    // A fresh tracer, at any clock value (the awake clock may be small).
-    for ([_]i64{ 0, 5, 1 << 40 }) |now| try testing.expect(!t.rateLimited(now));
-    for (0..max_starts_per_min) |k| t.noteStart(viewer_a, 1000 + @as(i64, @intCast(k)));
-    try testing.expect(t.rateLimited(1059));
-    try testing.expect(!t.rateLimited(1060)); // the oldest is a minute old
-    t.noteStart(viewer_a, 1060);
-    try testing.expect(t.rateLimited(1060)); // the oldest is now 1001
-    try testing.expect(!t.rateLimited(1061));
-    const now = t.clock();
-    t.starts = @splat(now - 59);
-    try testing.expectError(error.RateLimited, t.start("127.0.0.1", viewer_a));
-    try testing.expectEqual(@as(usize, 0), t.watchCount(viewer_a));
+    const ns = std.time.ns_per_s;
+    // Ten viewers start one each: the eleventh waits for the bucket to refill
+    // (one start every 6 s).
+    for (0..max_starts_per_min) |i| try testing.expect(t.allowStart(viewerOf(.{ .v4 = .{ 198, 51, 100, @intCast(i) } }), 1000 * ns));
+    const late = viewerOf(.{ .v4 = .{ 198, 51, 100, 200 } });
+    try testing.expect(!t.allowStart(late, 1000 * ns));
+    try testing.expect(t.allowStart(late, 1006 * ns));
+    // Through `start`, at the real clock.
+    var u: Tracer = .{ .gpa = testing.allocator, .io = testing.io };
+    defer u.deinit();
+    for (0..max_starts_per_min) |i| _ = u.allowStart(viewerOf(.{ .v4 = .{ 198, 51, 100, @intCast(i) } }), u.clockNs());
+    try testing.expectError(error.RateLimited, u.start("127.0.0.1", viewer_a));
+    try testing.expectEqual(@as(usize, 0), u.watchCount(viewer_a));
 }
 
 test "one viewer cannot use up the starts of everybody else" {
     var t: Tracer = .{ .gpa = testing.allocator, .io = testing.io };
     defer t.deinit();
+    const ns = std.time.ns_per_s;
     const other = viewerOf(.{ .v4 = .{ 192, 0, 2, 99 } });
-    try testing.expect(!t.viewerRateLimited(viewer_a, 5000));
-    for (0..max_viewer_starts_per_min) |k| t.noteStart(viewer_a, 5000 + @as(i64, @intCast(k)));
-    try testing.expect(t.viewerRateLimited(viewer_a, 5059));
-    try testing.expect(!t.viewerRateLimited(other, 5059));
-    try testing.expect(!t.rateLimited(5059)); // nobody else is held back
-    try testing.expect(!t.viewerRateLimited(viewer_a, 5060)); // the oldest is a minute old
-    const now = t.clock();
-    for (0..max_viewer_starts_per_min) |_| t.noteStart(viewer_a, now);
-    try testing.expectError(error.RateLimited, t.start("127.0.0.1", viewer_a));
-    try testing.expectEqual(@as(usize, 0), t.watchCount(viewer_a));
+    for (0..max_viewer_starts_per_min) |_| try testing.expect(t.allowStart(viewer_a, 5000 * ns));
+    try testing.expect(!t.allowStart(viewer_a, 5000 * ns));
+    // Its refusals took nothing from the others: 6 more fit in the total.
+    try testing.expect(t.allowStart(other, 5000 * ns));
+    for (1..max_starts_per_min - max_viewer_starts_per_min) |i| try testing.expect(t.allowStart(viewerOf(.{ .v4 = .{ 198, 51, 100, @intCast(i) } }), 5000 * ns));
+    try testing.expect(!t.allowStart(viewerOf(.{ .v4 = .{ 192, 0, 2, 98 } }), 5000 * ns)); // the total is used up
+    // A viewer's own start comes back after 15 s (4 a minute).
+    try testing.expect(t.allowStart(viewer_a, 5015 * ns));
 }
 
 test "snapshot JSON: hops, responders first, microseconds" {

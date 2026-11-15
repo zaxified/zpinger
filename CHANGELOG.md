@@ -40,6 +40,16 @@ and these entries come from zig-fping's CHANGELOG.md.
   again. A trace goes where the probing goes: after a move to the other
   family it starts over at the new address.
 
+- **Less code of our own: zig-libs modules where they exist.** Log
+  timestamps come from `datefmt`, the response headers from
+  `security-headers` (CSP unchanged; adds its defaults: X-Frame-Options,
+  Cross-Origin-Opener/Resource-Policy, Origin-Agent-Cluster and others; no
+  HSTS, the TLS proxy owns it), ETag revalidation from `http.conditional`
+  (RFC 9110; a `-gzip` suffix a compressing proxy adds still matches, any
+  other suffix no longer does), the trace start limits from `ratelimit`
+  token buckets (10 a minute in all, 4 per viewer, refilled evenly instead of
+  an exact 60-second window), and the IPv6 /64 client key from `netaddr`.
+
 ## 0.3.0 (2026-11-14)
 
 - **A problem is judged by the median jitter**, not the mean: 1 % packet
