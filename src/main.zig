@@ -51,6 +51,8 @@ const usage =
     \\                       peer (a reverse proxy) from X-Forwarded-For (default on)
     \\  --dns-stale SECONDS  keep probing a name's last address this long while
     \\                       DNS does not answer (default 86400, 0 = never)
+    \\  --dns-rate N         names looked up per second on average, at most
+    \\                       (default 20; more wait for the next cycle)
     \\  --access-log refused|all|off
     \\                       requests logged as events: refused ones (status 400
     \\                       and up, the default), all, or none
@@ -131,6 +133,9 @@ pub fn main(init: std.process.Init) !void {
             } else return fail(io, "--trust-proxy is on or off");
         } else if (std.mem.eql(u8, arg, "--dns-stale")) {
             monitor.dns_stale_s = std.fmt.parseInt(u31, value, 10) catch return fail(io, "bad --dns-stale");
+        } else if (std.mem.eql(u8, arg, "--dns-rate")) {
+            monitor.dns_rate = std.fmt.parseInt(u32, value, 10) catch return fail(io, "bad --dns-rate");
+            if (monitor.dns_rate < 1 or monitor.dns_rate > 10_000) return fail(io, "--dns-rate must be 1 to 10000");
         } else if (std.mem.eql(u8, arg, "--access-log")) {
             access_log = std.meta.stringToEnum(AccessLog, value) orelse return fail(io, "--access-log is refused, all or off");
         } else if (std.mem.eql(u8, arg, "--log-level")) {

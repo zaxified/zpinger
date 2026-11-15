@@ -108,13 +108,23 @@ Not there yet; know them before you expose it:
   says so; a name that no longer exists shows its target DOWN.
 - **A name follows the host's network.** zpinger listens to the kernel's
   address and route notifications (what `ip monitor` reads, no privilege
-  needed): when a global address or a default route comes or goes (a Wi-Fi
-  switch, IPv6 lost or back, a VPN), the next cycle looks every name up
-  again, whatever its TTL. A lookup puts addresses the host has no route to
-  last, so a name moves to the family that has one within a cycle, and back
-  once the preferred family (IPv6) returns. Without the notifications (a
-  sandbox that refuses netlink), a probe that cannot be sent for lack of a
-  route ("no route to host" on the page) does the same within a minute.
+  needed). When a global address or a default route comes or goes (a Wi-Fi
+  switch, IPv6 lost or back, a VPN), the next cycle checks, without DNS,
+  which names' addresses have no route any more and looks those up at once
+  (a lookup puts addresses the host has no route to last, so the name moves
+  to the family that has one). The other names are looked up again at a
+  random point of the next 10 minutes, to move back to the preferred family
+  (IPv6) once it returns. Without the notifications (a sandbox that refuses
+  netlink), a probe that cannot be sent for lack of a route ("no route to
+  host" on the page) makes its name look again within a minute.
+- **DNS is asked sparingly.** At most `--dns-rate` names a second (20,
+  1200 a minute) are looked up, names without a route first; the others
+  keep their address until the next cycle, so a big list or a flapping link
+  never sends the local resolver a burst. A lookup that keeps failing (no
+  answer, no such name, no route to what it found) waits longer each time:
+  1, 2, 4 … 60 minutes, back to normal after an answer that works or a
+  change of the network. A target that is merely down (no replies) asks
+  DNS only when its answer's TTL runs out, never per probe or per cycle.
 - **No TLS.** HTTP/1.1 with keep-alive, each connection on its own thread. A
   reverse proxy in front provides TLS, and the host's protection (CrowdSec,
   fail2ban) per-client request limits.

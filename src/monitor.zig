@@ -81,6 +81,12 @@ pub const Target = struct {
     dns: DnsState = .ok,
     /// Why the last lookup failed while the old `addr` is still probed.
     dns_error: ?[]const u8 = null,
+    /// Lookups in a row that failed, found no address, or found only one
+    /// the host has no route to: the next waits longer each time
+    /// (`backoffS`), so a name that stays broken is not asked about every
+    /// minute for good. Cleared by an answer that works, and by a change of
+    /// the host's network.
+    dns_fails: u8 = 0,
     /// Sample-data scenario for `Monitor.demo`.
     scenario: ?demo.Scenario = null,
     /// Where this target's real data starts in a demo: everything older is
@@ -123,6 +129,11 @@ pub const StateTag = struct {
 /// number the defaults are measured and tuned for (probing, the page, the
 /// data on the wire; doc/how-it-works.md § Limits).
 pub const default_max_targets = 200;
+/// See `Monitor.dns_rate`. 20 names a second (40 queries, A and AAAA) is
+/// 1200 names a minute: the default 200 targets never wait, and 10 000
+/// names after a network change reach a local resolver spread over minutes
+/// rather than in one burst.
+pub const default_dns_rate = 20;
 /// What `ZPINGER_MAX_TARGETS` may raise it to (untested above the default).
 pub const max_targets_ceiling = 10_000;
 /// The most cycles a state delta (`Monitor.state` with `since`) holds; an
@@ -149,6 +160,10 @@ pub const Monitor = struct {
     /// How long the last address of a name is probed while DNS does not
     /// answer (RFC 8767 "serve stale"); 0 = never (`--dns-stale`).
     dns_stale_s: i64 = 24 * 3600,
+    /// Names looked up per second on average (`--dns-rate`): a cycle looks
+    /// up at most `dns_rate * cycle_s` of them, the rest wait for the next
+    /// (see `planLookups`).
+    dns_rate: u32 = default_dns_rate,
     /// Target list (JSON). Rewritten on every change unless `read_only`.
     config_path: []const u8,
     /// History snapshot (JSON), rewritten after every cycle; null = keep
@@ -457,13 +472,14 @@ pub const Monitor = struct {
         // 1. Snapshot the active targets, so probing runs without the lock.
         //    After a network change every name is looked up again.
         const net_changed = m.net_changed.swap(false, .acq_rel);
-        if (net_changed) log.info("the network changed: every name is looked up again", .{});
+        if (net_changed) log.info("the network changed: names are looked up again", .{});
         const jobs = blk: {
             m.mutex.lockUncancelable(m.io);
             defer m.mutex.unlock(m.io);
             var list: std.ArrayList(Job) = .empty;
             for (m.targets.items) |target| {
                 if (target.paused) continue;
+                if (net_changed) target.dns_fails = 0; // a new network: try afresh
                 const host = arena.dupe(u8, target.host) catch return;
                 list.append(arena, .{
                     .id = target.id,
@@ -472,6 +488,7 @@ pub const Monitor = struct {
                     .confirmed = target.addr_confirmed,
                     .due = net_changed or t >= target.addr_expires,
                     .previous_error = target.last_error,
+                    .fails = target.dns_fails,
                 }) catch return;
             }
             break :blk list.items;
@@ -486,7 +503,9 @@ pub const Monitor = struct {
             return;
         }
 
-        // 2. Resolve the names whose answer expired (numeric addresses skip DNS).
+        // 2. Resolve the names whose answer expired (numeric addresses skip
+        //    DNS), within the lookup budget.
+        planLookups(m.io, jobs, .{ .now = t, .budget = @as(u64, m.dns_rate) * @as(u64, @intCast(m.cycle_s)), .net_changed = net_changed }, hasRoute);
         resolveAll(m.io, m.gpa, jobs, .{ .now = t, .stale_s = m.dns_stale_s });
 
         // 3. Ping every resolved target, the probes spread over what is left
@@ -579,12 +598,18 @@ pub const Monitor = struct {
         if (target.paused) return; // paused while this cycle ran
         if (!std.mem.eql(u8, target.host, job.host)) return; // moved to another host meanwhile
         recordDnsLocked(target, job);
+        if (job.pull_expires) |p| target.addr_expires = @min(target.addr_expires, p);
         if (job.no_route and job.replies == 0) {
             if (job.err == null) job.err = "no route to host";
             // The network changed (an interface or its default route went
-            // away): a name looks again within a minute, not when its TTL
-            // runs out, so it can move to the family that has a route.
-            if (icmp.Addr.parse(job.host)) |_| {} else |_| target.addr_expires = @min(target.addr_expires, t + min_ttl_s);
+            // away, unnoticed by `netwatch`): a name looks again within a
+            // minute, not when its TTL runs out, so it can move to the
+            // family that has a route. A fresh answer that still has no
+            // route counts as a failed lookup: the next waits longer.
+            if (icmp.Addr.parse(job.host)) |_| {} else |_| {
+                if (job.looked_up) target.dns_fails +|= 1;
+                target.addr_expires = @min(target.addr_expires, t + backoffS(target.dns_fails));
+            }
         }
         var sample: Sample = .{ .t = t, .sent = probes_per_cycle };
         if (job.err == null) {
@@ -630,6 +655,7 @@ pub const Monitor = struct {
             target.addr_confirmed = job.confirmed;
         }
         target.addr_expires = job.expires;
+        target.dns_fails = if (target.dns == .ok) 0 else target.dns_fails +| 1;
         if (target.dns != before) switch (target.dns) {
             .ok => _ = events.emit(.info, .dns, .system, null, "action=recovered target={d} host={f} addr={f}", .{ target.id, events.quote(target.host), target.addr.?.toIp() }),
             .stale => _ = events.emit(.warn, .dns, .system, null, "action=stale target={d} host={f} addr={f} error={s}", .{ target.id, events.quote(target.host), target.addr.?.toIp(), target.dns_error.? }),
@@ -1188,6 +1214,62 @@ const max_ttl_s = 3600;
 const default_ttl_s = 300;
 /// After a failed lookup, the next try (the stale address is probed meanwhile).
 const retry_s = 60;
+/// After a network change, a name whose address still has a route is
+/// looked up again at a random point this long: only to move back to a
+/// preferred family (IPv6 returning), which is not urgent, so 10 000 names
+/// do not reach the resolver at once -- nor at every flap of a flapping link.
+const net_spread_s = 600;
+
+/// How long after `fails` failed lookups in a row the next is tried:
+/// `retry_s`, doubled each time, at most `max_ttl_s` (1, 2, 4 … 60 minutes).
+fn backoffS(fails: u8) i64 {
+    return @min(@as(i64, retry_s) << @min(fails, 6), max_ttl_s);
+}
+
+/// Whether the host has a route to `ip` now (no DNS: a UDP connect()).
+fn hasRoute(ip: netaddr.Ip) bool {
+    return netaddr.systemSource(ip) != null;
+}
+
+const LookupPlan = struct { now: i64, budget: u64, net_changed: bool };
+
+/// Which names this cycle looks up (`due`). After a network change: every
+/// name whose address has no route any more (`routed`), first, and every
+/// name without an address; the others at a random point within
+/// `net_spread_s`. Then at most `plan.budget` lookups: no route first, then
+/// names without an address, then expired answers; the rest are `deferred`
+/// to the next cycle and probe their old address meanwhile.
+fn planLookups(io: Io, jobs: []Job, plan: LookupPlan, routed: *const fn (netaddr.Ip) bool) void {
+    if (plan.net_changed) for (jobs) |*job| {
+        if (icmp.Addr.parse(job.host)) |_| continue else |_| {}
+        const cached = job.cached orelse {
+            job.due = true;
+            continue;
+        };
+        if (!routed(cached.toIp())) {
+            job.due = true;
+            job.urgent = true;
+        } else if (!job.due) {
+            var r: [4]u8 = undefined;
+            io.random(&r);
+            job.pull_expires = plan.now + std.mem.readInt(u32, &r, .little) % net_spread_s;
+        }
+    };
+    var used: u64 = 0;
+    for (0..3) |pass| for (jobs) |*job| {
+        if (!job.due) continue;
+        if (icmp.Addr.parse(job.host)) |_| continue else |_| {}
+        const rank: usize = if (job.urgent) 0 else if (job.cached == null) 1 else 2;
+        if (rank != pass) continue;
+        if (used < plan.budget) {
+            used += 1;
+        } else {
+            job.due = false;
+            job.deferred = true;
+            job.pull_expires = plan.now; // due again at the next cycle
+        }
+    };
+}
 
 /// The preferred address of `host` (RFC 6724 order, like getaddrinfo);
 /// numeric addresses skip DNS.
@@ -1239,7 +1321,7 @@ fn resolveJobs(io: Io, gpa: std.mem.Allocator, jobs: []Job, next: *std.atomic.Va
             // A name with no address waits for its retry (`retry_s`, or the
             // negative TTL) with the error it had.
             job.addr = job.cached;
-            if (job.cached == null) job.err = job.previous_error orelse "name does not resolve";
+            if (job.cached == null) job.err = if (job.deferred) "waiting for its DNS lookup" else job.previous_error orelse "name does not resolve";
             continue;
         }
         if (resolver == null) resolver = dns.Resolver.init(io, gpa, .{ .timeout_ms = lookup_timeout_ms });
@@ -1258,7 +1340,7 @@ fn resolveJobs(io: Io, gpa: std.mem.Allocator, jobs: []Job, next: *std.atomic.Va
 fn settleFailure(job: *Job, err: anyerror, policy: DnsPolicy) void {
     job.looked_up = true;
     job.dns_error = dnsErrorName(err);
-    job.expires = policy.now + retry_s;
+    job.expires = policy.now + backoffS(job.fails);
     if (job.cached) |addr| if (policy.stale_s > 0 and policy.now - job.confirmed <= policy.stale_s) {
         job.addr = addr;
         return;
@@ -1276,6 +1358,7 @@ fn settleAnswer(job: *Job, found: dns.Resolver.IpLookup, policy: DnsPolicy) void
     const ttl: i64 = found.ttl_s orelse default_ttl_s;
     job.expires = policy.now + std.math.clamp(ttl, min_ttl_s, max_ttl_s);
     if (found.ips.len == 0) {
+        job.expires = @max(job.expires, policy.now + backoffS(job.fails));
         job.err = "name does not resolve";
         job.dns_error = "NoAddress";
         job.dns_failed = true;
@@ -1344,6 +1427,14 @@ const Job = struct {
     sent: u8 = 0,
     /// A probe could not be sent: no route to the address (ENETUNREACH).
     no_route: bool = false,
+    /// The target's `dns_fails`, for the backoff of a failing lookup.
+    fails: u8 = 0,
+    /// From `planLookups`: its address has no route since the network
+    /// changed (looked up first); over the cycle's budget (`deferred`, so
+    /// not looked up now); and an earlier time for the next lookup.
+    urgent: bool = false,
+    deferred: bool = false,
+    pull_expires: ?i64 = null,
 };
 
 /// How long a probe waits for its reply.
@@ -1946,6 +2037,85 @@ test "DNS cache: TTL bounds, a kept address stays, stale while DNS is down, NXDO
     job = .{ .id = 1, .host = "example.com", .cached = .fromIp(ip("192.0.2.2")), .confirmed = 1000 };
     settleAnswer(&job, .{ .ips = &.{}, .ttl_s = 900 }, policy);
     try testing.expect(job.addr == null and job.err != null and job.dns_failed);
+}
+
+test "lookup plan: the budget, names without a route first, the rest spread after a network change" {
+    const ip = struct {
+        fn of(text: []const u8) icmp.Addr {
+            return .fromIp(netaddr.parseIp(text).?);
+        }
+    }.of;
+    // 2001:db8::/32 has no route here; anything else has.
+    const routed = struct {
+        fn f(a: netaddr.Ip) bool {
+            return a == .v4;
+        }
+    }.f;
+    const fresh = [_]Job{
+        .{ .id = 1, .host = "192.0.2.9" }, // literal: never looked up, never counted
+        .{ .id = 2, .host = "ttl.example", .cached = ip("192.0.2.1"), .due = true },
+        .{ .id = 3, .host = "new.example" }, // no address yet
+        .{ .id = 4, .host = "v6.example", .cached = ip("2001:db8::1"), .due = false },
+        .{ .id = 5, .host = "fine.example", .cached = ip("192.0.2.2"), .due = false },
+    };
+
+    // No change, budget 1: the name without an address goes before an expired answer.
+    var jobs = fresh;
+    planLookups(testing.io, &jobs, .{ .now = 1000, .budget = 1, .net_changed = false }, routed);
+    try testing.expect(jobs[2].due and !jobs[2].deferred);
+    try testing.expect(!jobs[1].due and jobs[1].deferred);
+    try testing.expectEqual(1000, jobs[1].pull_expires.?); // due again next cycle
+    try testing.expect(!jobs[3].due and !jobs[3].deferred and jobs[3].pull_expires == null);
+
+    // A network change, budget 2: the name without a route first, then the
+    // one without an address; the expired answer waits; a routed one is spread.
+    jobs = fresh;
+    planLookups(testing.io, &jobs, .{ .now = 1000, .budget = 2, .net_changed = true }, routed);
+    try testing.expect(jobs[3].due and jobs[3].urgent);
+    try testing.expect(jobs[2].due);
+    try testing.expect(jobs[1].deferred);
+    try testing.expect(!jobs[4].due);
+    const at = jobs[4].pull_expires.?;
+    try testing.expect(at >= 1000 and at < 1000 + net_spread_s);
+    try testing.expect(!jobs[0].deferred and !jobs[0].urgent and jobs[0].pull_expires == null);
+
+    // A deferred name without an address says why it has none.
+    var deferred: Job = .{ .id = 3, .host = "new.example", .due = false, .deferred = true };
+    var next: std.atomic.Value(usize) = .init(0);
+    resolveJobs(testing.io, testing.allocator, (&deferred)[0..1], &next, .{ .now = 1000, .stale_s = 3600 });
+    try testing.expectEqualStrings("waiting for its DNS lookup", deferred.err.?);
+}
+
+test "a lookup that keeps failing backs off: 1, 2, 4 ... 60 minutes" {
+    try testing.expectEqual(60, backoffS(0));
+    try testing.expectEqual(120, backoffS(1));
+    try testing.expectEqual(1920, backoffS(5));
+    try testing.expectEqual(max_ttl_s, backoffS(6));
+    try testing.expectEqual(max_ttl_s, backoffS(255));
+
+    const policy: DnsPolicy = .{ .now = 1000, .stale_s = 3600 };
+    var job: Job = .{ .id = 1, .host = "example.com", .fails = 3 };
+    settleFailure(&job, error.Timeout, policy);
+    try testing.expectEqual(1000 + 480, job.expires);
+    // No such name: the negative TTL, or the backoff when that is longer.
+    job = .{ .id = 1, .host = "example.com", .fails = 2 };
+    settleAnswer(&job, .{ .ips = &.{}, .ttl_s = 60 }, policy);
+    try testing.expectEqual(1000 + 240, job.expires);
+
+    // The target counts the failures in a row; an answer that works clears them.
+    var m = testMonitor();
+    defer m.deinit();
+    events.level = .err;
+    defer events.level = .info;
+    const id = try m.add("a", "example.com", &.{});
+    const t = m.targets.items[0];
+    job = .{ .id = id, .host = t.host, .looked_up = true, .err = "name does not resolve", .dns_error = "NoAddress", .dns_failed = true, .expires = 1240 };
+    Monitor.recordDnsLocked(t, &job);
+    Monitor.recordDnsLocked(t, &job);
+    try testing.expectEqual(2, t.dns_fails);
+    job = .{ .id = id, .host = t.host, .looked_up = true, .addr = .fromIp(netaddr.parseIp("192.0.2.1").?), .confirmed = 1000, .expires = 1300 };
+    Monitor.recordDnsLocked(t, &job);
+    try testing.expectEqual(0, t.dns_fails);
 }
 
 test "no route to the address: the error says so and a name looks again within a minute" {
