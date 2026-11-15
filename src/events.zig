@@ -101,7 +101,11 @@ var queue_on: std.atomic.Value(bool) = .init(false);
 /// Guarded by the stderr lock (`flushQueue`).
 var out_buf: [queue_size]u8 = undefined;
 
-// zig-libs request: accesslog — Sink has no non-blocking drop-counted mode.
+// zig-libs request: accesslog — AsyncSink (non-blocking, drop-counted) exists, but
+// log() returns void and dropped() is one total, so a drop cannot be attributed
+// to a rate-limit Class (the `event=log action=dropped class=` line); and
+// writeLogfmtValue has no always-quote / \xNN / truncation-marker mode, so
+// `Quoted` (doc/security-log.md, a parser contract) cannot move to it.
 fn enqueue(line: []const u8) bool {
     {
         while (!queue_lock.tryLock()) std.atomic.spinLoopHint();
