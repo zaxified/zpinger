@@ -176,7 +176,11 @@ pub fn main(init: std.process.Init) !void {
     var addr_buf: [netaddr.max_ip_text_len]u8 = undefined;
     const addr_text = netaddr.formatIp(ipOf(address), &addr_buf);
     // Guard.init rejects options outside their range; ours are constants inside it.
-    const guard = abuseguard.Guard.init(gpa, .{ .max_conns_per_ip = max_connections_per_ip }) catch unreachable;
+    const guard = abuseguard.Guard.init(gpa, .{
+        .max_conns_total = max_connections,
+        .max_conns_per_ip = max_connections_per_ip,
+        .per_ip_cap_exempt = &loopback_prefixes,
+    }) catch unreachable;
     var admission: Admission = .{ .io = io, .gpa = gpa, .guard = guard };
     defer admission.deinit();
     var server = http.Server.init(io, gpa, .{
@@ -242,23 +246,26 @@ const max_connections_per_ip = 16;
 /// The largest request body: a target is a few hundred bytes of JSON.
 const max_body_bytes = 4096;
 
-/// Admission at accept time: the global cap here, the per-client cap in an
-/// `abuseguard.Guard`. A peer on loopback is the reverse proxy, carrying
-/// every client on one address: only the global cap applies to it.
+/// A peer on loopback is the reverse proxy, carrying every client on one
+/// address: only the global cap applies to it.
+const loopback_prefixes = [_]netaddr.Prefix{
+    .{ .addr = .{ .v4 = .{ 127, 0, 0, 0 } }, .bits = 8 },
+    .{ .addr = .{ .v6 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } }, .bits = 128 },
+};
+
+/// Admission at accept time: the global and the per-client cap, in an
+/// `abuseguard.Guard` (loopback exempt from the per-client one).
 ///
 /// It also follows every connection to its end: one a timeout cut off (a
 /// slowloris holding a thread, a slow reader) is reported by `onError`
 /// with what was counted here, one that closed without a single request (a
 /// port scan, a TLS client on the plain-HTTP port) here.
-// zig-libs request: abuseguard — no per-IP-cap exemption for a trusted proxy
-// (Options.allow lifts reputation only), so the global cap is counted here;
-// http — `.closed` carries no per-connection summary and `timed_out` fires
-// after it, hence the live map and `last_closed` below.
+// zig-libs request: http — `.closed` carries no per-connection summary and
+// `timed_out` fires after it, hence the live map and `last_closed` below.
 const Admission = struct {
     io: Io,
     gpa: std.mem.Allocator,
     guard: abuseguard.Guard,
-    open: std.atomic.Value(u32) = .init(0),
     mutex: Io.Mutex = .init,
     /// Open connections by peer address and port: when it started, and
     /// how many requests it sent.
@@ -282,17 +289,10 @@ const Admission = struct {
     fn onConnect(ctx: ?*anyopaque, peer: Io.net.IpAddress) http.Server.ConnDecision {
         const a: *Admission = @ptrCast(@alignCast(ctx.?));
         const ip = ipOf(peer);
-        if (a.open.fetchAdd(1, .monotonic) >= max_connections) {
-            _ = a.open.fetchSub(1, .monotonic);
-            _ = events.emit(.warn, .conn, .conn, .of(ip), "action=refused reason=total_cap", .{});
-            return .reject;
-        }
-        if (ip.isLoopback()) return .accept;
         const verdict = a.guard.admit(ip);
         switch (verdict) {
             .admitted, .admitted_untracked => return .accept,
             else => {
-                _ = a.open.fetchSub(1, .monotonic);
                 _ = events.emit(.warn, .conn, .conn, .of(ip), "action=refused reason={t}", .{verdict});
                 return .reject;
             },
@@ -303,10 +303,7 @@ const Admission = struct {
     /// exactly once; `.active` once per request.
     fn onConnState(ctx: ?*anyopaque, peer_or_null: ?Io.net.IpAddress, state: http.Server.ConnState) void {
         const a: *Admission = @ptrCast(@alignCast(ctx.?));
-        const peer = peer_or_null orelse {
-            if (state == .closed) _ = a.open.fetchSub(1, .monotonic);
-            return;
-        };
+        const peer = peer_or_null orelse return;
         const now = Io.Clock.awake.now(a.io).nanoseconds;
         switch (state) {
             .new => {
@@ -321,9 +318,8 @@ const Admission = struct {
             },
             .idle => {},
             .closed => {
-                _ = a.open.fetchSub(1, .monotonic);
                 const ip = ipOf(peer);
-                if (!ip.isLoopback()) a.guard.connClosed(ip);
+                a.guard.connClosed(ip);
                 const conn = blk: {
                     a.mutex.lockUncancelable(a.io);
                     defer a.mutex.unlock(a.io);
