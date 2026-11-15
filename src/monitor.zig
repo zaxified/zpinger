@@ -567,6 +567,13 @@ pub const Monitor = struct {
         if (target.paused) return; // paused while this cycle ran
         if (!std.mem.eql(u8, target.host, job.host)) return; // moved to another host meanwhile
         recordDnsLocked(target, job);
+        if (job.no_route and job.replies == 0) {
+            if (job.err == null) job.err = "no route to host";
+            // The network changed (an interface or its default route went
+            // away): a name looks again within a minute, not when its TTL
+            // runs out, so it can move to the family that has a route.
+            if (icmp.Addr.parse(job.host)) |_| {} else |_| target.addr_expires = @min(target.addr_expires, t + min_ttl_s);
+        }
         var sample: Sample = .{ .t = t, .sent = probes_per_cycle };
         if (job.err == null) {
             sample.sent = job.sent;
@@ -1273,9 +1280,15 @@ fn settleAnswer(job: *Job, found: dns.Resolver.IpLookup, policy: DnsPolicy) void
     };
     job.confirmed = policy.now;
     job.addr = icmp.Addr.fromIp(found.ips[0]);
-    if (job.cached) |c| for (found.ips) |ip| if (ip.eql(c.toIp())) {
-        job.addr = c;
-        break;
+    // The kept address stays only within the family the answer now prefers:
+    // its RFC 6724 order puts a family without a route last (rule 1), so a
+    // v6 address kept from before a network change without IPv6 gives way
+    // to v4 -- and v4 to v6 once IPv6 is back and preferred again.
+    if (job.cached) |c| if (std.meta.activeTag(c.toIp()) == std.meta.activeTag(found.ips[0])) {
+        for (found.ips) |ip| if (ip.eql(c.toIp())) {
+            job.addr = c;
+            break;
+        };
     };
 }
 
@@ -1317,6 +1330,8 @@ const Job = struct {
     rtts: [probes_per_cycle]u32 = undefined,
     replies: u8 = 0,
     sent: u8 = 0,
+    /// A probe could not be sent: no route to the address (ENETUNREACH).
+    no_route: bool = false,
 };
 
 /// How long a probe waits for its reply.
@@ -1377,7 +1392,11 @@ fn probe(m: *Monitor, jobs: []Job, t: i64, window_ns: u64) !void {
             const job = c.map[id];
             const rtt_us: ?u32 = switch (outcome) {
                 .reply => |r| @intCast(@min(r.rtt_ns / std.time.ns_per_us, std.math.maxInt(u32))),
-                .timeout, .send_error => null,
+                .timeout => null,
+                .send_error => |err| blk: {
+                    if (err == error.NetworkUnreachable) job.no_route = true;
+                    break :blk null;
+                },
                 .duplicate => return,
             };
             if (rtt_us) |v| if (job.replies < probes_per_cycle) {
@@ -1876,6 +1895,16 @@ test "DNS cache: TTL bounds, a kept address stays, stale while DNS is down, NXDO
     try testing.expect(job.addr.?.toIp().eql(ip("192.0.2.2")));
     try testing.expectEqual(1000, job.confirmed);
 
+    // ... but not when the answer now prefers the other family (the kept
+    // one lost its route): v6 gives way to v4, and back again.
+    var mixed = [_]netaddr.Ip{ ip("192.0.2.1"), ip("2001:db8::1") };
+    job = .{ .id = 1, .host = "example.com", .cached = .fromIp(ip("2001:db8::1")) };
+    settleAnswer(&job, .{ .ips = &mixed, .ttl_s = 300 }, policy);
+    try testing.expect(job.addr.?.toIp().eql(ip("192.0.2.1")));
+    std.mem.swap(netaddr.Ip, &mixed[0], &mixed[1]);
+    settleAnswer(&job, .{ .ips = &mixed, .ttl_s = 300 }, policy);
+    try testing.expect(job.addr.?.toIp().eql(ip("2001:db8::1")));
+
     // No answer: the cached address while it is young enough, else nothing.
     job = .{ .id = 1, .host = "example.com", .cached = .fromIp(ip("192.0.2.2")), .confirmed = 1000 - 3600 };
     settleFailure(&job, error.Timeout, policy);
@@ -1905,6 +1934,38 @@ test "DNS cache: TTL bounds, a kept address stays, stale while DNS is down, NXDO
     job = .{ .id = 1, .host = "example.com", .cached = .fromIp(ip("192.0.2.2")), .confirmed = 1000 };
     settleAnswer(&job, .{ .ips = &.{}, .ttl_s = 900 }, policy);
     try testing.expect(job.addr == null and job.err != null and job.dns_failed);
+}
+
+test "no route to the address: the error says so and a name looks again within a minute" {
+    var m = testMonitor();
+    defer m.deinit();
+    const id = try m.add("a", "example.com", &.{});
+    const num = try m.add("b", "2001:db8::1", &.{});
+    const t = m.targets.items[0];
+    const tn = m.targets.items[1];
+    t.addr_expires = 5000;
+    tn.addr_expires = 5000;
+
+    var job: Job = .{ .id = id, .host = t.host, .sent = probes_per_cycle, .no_route = true };
+    m.mutex.lockUncancelable(m.io);
+    m.recordLocked(t, 60, &job);
+    var jn: Job = .{ .id = num, .host = tn.host, .sent = probes_per_cycle, .no_route = true };
+    m.recordLocked(tn, 60, &jn);
+    m.mutex.unlock(m.io);
+    try testing.expectEqualStrings("no route to host", t.last_error.?);
+    try testing.expectEqual(60 + min_ttl_s, t.addr_expires);
+    try testing.expectEqual(.down, t.status());
+    try testing.expectEqual(5000, tn.addr_expires); // a numeric address has nothing to look up
+
+    // A reply in the cycle: the route is there, nothing changes.
+    t.addr_expires = 5000;
+    job = .{ .id = id, .host = t.host, .sent = probes_per_cycle, .replies = 1, .no_route = true };
+    job.rtts[0] = 1000;
+    m.mutex.lockUncancelable(m.io);
+    m.recordLocked(t, 120, &job);
+    m.mutex.unlock(m.io);
+    try testing.expect(t.last_error == null);
+    try testing.expectEqual(5000, t.addr_expires);
 }
 
 test "DNS cache: the target keeps the address, its state follows the lookups, a new host resets it" {

@@ -4,6 +4,16 @@ This application started in the zig-fping repository as
 `example-apps/fping-watch`; its history was carried over (`git filter-repo`),
 and these entries come from zig-fping's CHANGELOG.md.
 
+## Unreleased
+
+- **A name follows a network change.** A target given by name kept its
+  address as long as DNS still listed it, so after a switch to a network
+  without IPv6 its AAAA address stayed DOWN for good although the name had
+  a reachable A address. The kept address now stays only within the family
+  the answer prefers (RFC 6724 puts one without a route last), and a probe
+  that cannot be sent for lack of a route ("no route to host" on the page)
+  makes the name look again within a minute instead of at its TTL.
+
 ## 0.3.0 (2026-11-14)
 
 - **A problem is judged by the median jitter**, not the mean: 1 % packet
