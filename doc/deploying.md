@@ -33,7 +33,8 @@ conflicts with the old `fping-watch` package (same default port); its
 
 The service runs as a throwaway user (`DynamicUser`) that can write only its
 state directory, with no capabilities at all and under a strict sandbox:
-seccomp `@system-service`, IPv4/IPv6 sockets only, a private user namespace,
+seccomp `@system-service`, IPv4/IPv6 sockets and netlink only (netlink to
+follow the host's network changes), a private user namespace,
 no writable-executable memory, read-only system, `TasksMax` and `MemoryMax`
 (`systemd-analyze security zpinger`: 1.3, "OK"). It pings through
 unprivileged ping sockets ([configuration.md](configuration.md#icmp)).

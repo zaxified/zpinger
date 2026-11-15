@@ -20,6 +20,7 @@ const trace = @import("trace.zig");
 const netaddr = @import("netaddr");
 const ratelimit = @import("ratelimit");
 const events = @import("events.zig");
+const netwatch = @import("netwatch.zig");
 
 const log = std.log.scoped(.web);
 
@@ -214,6 +215,7 @@ pub fn main(init: std.process.Init) !void {
     defer tasks.cancel(io);
     try tasks.concurrent(io, events.writeLoop, .{io});
     try tasks.concurrent(io, probeLoop, .{&monitor});
+    try tasks.concurrent(io, netwatchLoop, .{&monitor});
     try tasks.concurrent(io, events.flushLoop, .{io});
     if (stop_fd) |fd| try tasks.concurrent(io, stopOnSignal, .{ &monitor, fd });
     server.serve() catch |err| fatal(io, "serving failed: {t}", .{err});
@@ -416,6 +418,10 @@ fn print(io: Io, comptime fmt: []const u8, args: anytype) void {
 
 fn probeLoop(monitor: *Monitor) void {
     monitor.loop() catch {}; // canceled at shutdown
+}
+
+fn netwatchLoop(monitor: *Monitor) void {
+    netwatch.loop(monitor) catch {}; // canceled at shutdown
 }
 
 // ----- stopping -------------------------------------------------------------------
@@ -1022,4 +1028,5 @@ test {
     _ = @import("fuzz_test.zig");
     _ = @import("demo.zig");
     _ = @import("trace.zig");
+    _ = @import("netwatch.zig");
 }

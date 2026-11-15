@@ -204,6 +204,9 @@ pub const Monitor = struct {
     started_at: std.atomic.Value(i64) = .init(0),
     cycle_done_at: std.atomic.Value(i64) = .init(0),
     probing_ok: std.atomic.Value(bool) = .init(true),
+    /// Set by `netwatch` when the host's addresses or default routes
+    /// changed: the next cycle looks every name up again.
+    net_changed: std.atomic.Value(bool) = .init(false),
     /// The cycle being probed, for the page's live view (`writeLive`): its
     /// start (unix s, 0 = none yet), the targets it probes, and every probe
     /// answered or given up on so far, in that order. Guarded by
@@ -438,6 +441,12 @@ pub const Monitor = struct {
         return .{ .ok = probing_ok and now - since <= 3 * m.cycle_s, .probing_ok = probing_ok, .last_cycle = done };
     }
 
+    /// The host's network changed (`netwatch`): the next cycle looks every
+    /// name up again, so each moves to what the host reaches now.
+    pub fn noteNetworkChange(m: *Monitor) void {
+        m.net_changed.store(true, .release);
+    }
+
     /// One probing cycle. `t` is the cycle's start (unix seconds).
     pub fn runCycle(m: *Monitor, t: i64) void {
         defer m.flushSaves(); // after every unlock below
@@ -446,6 +455,9 @@ pub const Monitor = struct {
         const arena = arena_state.allocator();
 
         // 1. Snapshot the active targets, so probing runs without the lock.
+        //    After a network change every name is looked up again.
+        const net_changed = m.net_changed.swap(false, .acq_rel);
+        if (net_changed) log.info("the network changed: every name is looked up again", .{});
         const jobs = blk: {
             m.mutex.lockUncancelable(m.io);
             defer m.mutex.unlock(m.io);
@@ -458,7 +470,7 @@ pub const Monitor = struct {
                     .host = host,
                     .cached = target.addr,
                     .confirmed = target.addr_confirmed,
-                    .due = t >= target.addr_expires,
+                    .due = net_changed or t >= target.addr_expires,
                     .previous_error = target.last_error,
                 }) catch return;
             }

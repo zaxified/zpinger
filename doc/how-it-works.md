@@ -105,11 +105,16 @@ Not there yet; know them before you expose it:
   attempts, A and AAAA), and an address is kept for its DNS TTL (1 minute
   to 1 hour); numeric addresses never wait. When DNS does not answer, the
   last address is probed for up to `--dns-stale` (24 hours) and the page
-  says so; a name that no longer exists shows its target DOWN. A name
-  follows the network: when its address has no route any more (a Wi-Fi
-  change that took IPv6 away) the page shows "no route to host" and the name
-  is looked up again within a minute, moving to the family that has one —
-  and back once the preferred family returns.
+  says so; a name that no longer exists shows its target DOWN.
+- **A name follows the host's network.** zpinger listens to the kernel's
+  address and route notifications (what `ip monitor` reads, no privilege
+  needed): when a global address or a default route comes or goes (a Wi-Fi
+  switch, IPv6 lost or back, a VPN), the next cycle looks every name up
+  again, whatever its TTL. A lookup puts addresses the host has no route to
+  last, so a name moves to the family that has one within a cycle, and back
+  once the preferred family (IPv6) returns. Without the notifications (a
+  sandbox that refuses netlink), a probe that cannot be sent for lack of a
+  route ("no route to host" on the page) does the same within a minute.
 - **No TLS.** HTTP/1.1 with keep-alive, each connection on its own thread. A
   reverse proxy in front provides TLS, and the host's protection (CrowdSec,
   fail2ban) per-client request limits.

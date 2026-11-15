@@ -20,6 +20,13 @@ and these entries come from zig-fping's CHANGELOG.md.
   now; an ipv4/ipv6 tag stored on it is ignored and its tag editor does not
   offer them. A literal address keeps its own tags, as before.
 
+- **zpinger follows the host's network changes.** It listens to the
+  kernel's address and route notifications (rtnetlink, no privilege): a
+  global address or a default route coming or going makes the next cycle
+  look every name up again, so a name moves to the family the host can reach
+  within one cycle, and back to IPv6 as soon as it returns instead of after
+  its TTL. The systemd unit allows `AF_NETLINK` for it (exposure still 1.3).
+
 ## 0.3.0 (2026-11-14)
 
 - **A problem is judged by the median jitter**, not the mean: 1 % packet
