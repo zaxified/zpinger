@@ -58,7 +58,9 @@ with the previous pin: a new default-on feature in a module arrives silently.
 ## UI decisions (keep unless the owner changes them)
 
 - Tags: at most 8, lowercase, no spaces or commas; tag chips filter with AND; the search
-  matches every word against name, host and tags. View state lives in the URL fragment
+  matches every word against name, host and tags. A target given by name gets its ipv4/ipv6
+  tag from the address it resolves to now (dashed chip, not editable; stored ones ignored),
+  so the family filter follows a network change (owner, 2026-11-15). View state lives in the URL fragment
   (`#open=&tags=&q=&sort=&rev=&st=`).
 - A problem is **mean loss ≥ 1 % or median jitter ≥ 10 ms** over the window (median since 2026-11-14,
   owner: a busy probing host spiked every target's mean over 10 ms; since 2026-11-14

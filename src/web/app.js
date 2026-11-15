@@ -506,11 +506,11 @@ const rows = new Map(); // target id -> { node, sig, state, gen }
 // What a row is built from; the rest it updates in place.
 const rowSig = (t) =>
   JSON.stringify([
-    t.name, t.host, t.tags, statusOf(t), t.paused,
+    t.name, t.host, tagsOf(t), statusOf(t), t.paused,
     renaming !== null && renaming.id === t.id ? renaming.note : null, // the editor, and why it refused
     editing !== null && editing.id === t.id,
     rowNote !== null && rowNote.id === t.id ? rowNote.text : null,
-    t.tags.filter((tag) => view.tags.has(tag)),
+    tagsOf(t).filter((tag) => view.tags.has(tag)),
   ]);
 
 // More rows when the reader nears the end of the drawn ones.
@@ -859,8 +859,9 @@ function renderPills(base, stats) {
 // Every selected tag, and every word of the search somewhere in the name, the
 // host or a tag.
 function matches(t) {
-  for (const tag of view.tags) if (!t.tags.includes(tag)) return false;
-  const hay = [t.name, t.host, ...t.tags].map((s) => s.toLowerCase());
+  const tags = tagsOf(t);
+  for (const tag of view.tags) if (!tags.includes(tag)) return false;
+  const hay = [t.name, t.host, ...tags].map((s) => s.toLowerCase());
   return view.q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.some((h) => h.includes(w)));
 }
 
@@ -937,7 +938,7 @@ function clearFilter() {
 // The tag chips (every tag in use, plus a selected one no target has any
 // more, so it can be unselected), the order button and the match count.
 function renderToolbar(count) {
-  const all = new Set(state.targets.flatMap((t) => t.tags));
+  const all = new Set(state.targets.flatMap(tagsOf));
   for (const tag of view.tags) all.add(tag);
   const bar = $("#tagbar");
   bar.replaceChildren();
@@ -1402,6 +1403,21 @@ const EDIT_HINT = "Enter or a click outside saves, Esc cancels";
 const familyTag = (host) =>
   /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ? "ipv4" : host.includes(":") && /^[0-9a-f:.]+(%\S+)?$/i.test(host) ? "ipv6" : null;
 
+// A name's ipv4/ipv6 tag is the family of the address it resolves to now
+// (none while it resolves to nothing), not one kept in its tags: a name
+// moves between the families with the network (a Wi-Fi without IPv6), and
+// the tag filter follows. A literal address keeps the tags it has.
+const FAMILY_TAGS = ["ipv4", "ipv6"];
+const isName = (t) => familyTag(t.host) === null;
+const autoTag = (t) => (isName(t) && t.address ? familyTag(t.address) : null);
+// The tags a person set, the ones the picker edits.
+const ownTags = (t) => (isName(t) ? t.tags.filter((tag) => !FAMILY_TAGS.includes(tag)) : t.tags);
+// The tags the filter, the search and the row go by.
+function tagsOf(t) {
+  const auto = autoTag(t);
+  return auto ? [...ownTags(t), auto] : ownTags(t);
+}
+
 document.addEventListener("pointerdown", (ev) => {
   if (renaming && !ev.target.closest(".who-editor")) closeRename(true, false);
   if (editing && !ev.target.closest(".tag-popover, .edit-tags, .add-tags")) closeTagPicker(true, false);
@@ -1433,6 +1449,9 @@ async function closeRename(save, refocus) {
       const from = familyTag(t.host), to = familyTag(host);
       if (from && to && from !== to && t.tags.includes(from) && !t.tags.includes(to))
         change.tags = t.tags.map((x) => (x === from ? to : x));
+      // A name becoming an address: the tag it showed by its address stays.
+      const own = ownTags(t);
+      if (!from && to && !own.includes(to) && own.length < MAX_TAGS) change.tags = [...own, to];
     }
   }
   const done = () => {
@@ -1500,11 +1519,20 @@ function renderRenameEditor(t) {
 
 // The tags, their edit button and, when open, the picker. `owner` is a
 // target, or { id: "new", tags } for the add form.
-function renderTagLine(line, owner) {
+function renderTagLine(line, target) {
+  // A target's picker edits its own tags; its address's family tag is shown
+  // after them, set apart.
+  const owner = target.id === "new" ? target : { id: target.id, name: target.name, tags: ownTags(target), name_host: isName(target) };
+  const auto = target.id === "new" ? null : autoTag(target);
   const tags = $(".tags", line);
   tags.replaceChildren();
   for (const tag of owner.tags) tags.append(el("span", view.tags.has(tag) ? "rtag on" : "rtag", tag));
-  tags.hidden = owner.tags.length === 0;
+  if (auto) {
+    const chip = el("span", view.tags.has(auto) ? "rtag auto on" : "rtag auto", auto);
+    chip.title = `${target.host} resolves to ${target.address} now: the tag follows the address`;
+    tags.append(chip);
+  }
+  tags.hidden = owner.tags.length === 0 && !auto;
   const isOpen = editing !== null && editing.id === owner.id;
   const button = $(".edit-tags", line);
   button.textContent = owner.tags.length ? "✎" : "+ tags";
@@ -1559,7 +1587,8 @@ function openTagPicker(owner) {
   if (renaming) closeRename(true, false);
   if (editing) closeTagPicker(true, false);
   const inUse = state ? state.targets.flatMap((x) => x.tags) : [];
-  const others = [...new Set([...inUse, ...adding.tags])].filter((tag) => !owner.tags.includes(tag));
+  // A name's ipv4/ipv6 tag comes from its address: not one to pick.
+  const others = [...new Set([...inUse, ...adding.tags])].filter((tag) => !owner.tags.includes(tag) && !(owner.name_host && FAMILY_TAGS.includes(tag)));
   const byTag = (a, b) => a.localeCompare(b, undefined, { numeric: true });
   editing = { id: owner.id, selected: new Set(owner.tags), order: [...[...owner.tags].sort(byTag), ...others.sort(byTag)], filter: "" };
   rowNote = null;

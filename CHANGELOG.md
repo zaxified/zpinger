@@ -13,6 +13,12 @@ and these entries come from zig-fping's CHANGELOG.md.
   the answer prefers (RFC 6724 puts one without a route last), and a probe
   that cannot be sent for lack of a route ("no route to host" on the page)
   makes the name look again within a minute instead of at its TTL.
+- **The ipv4/ipv6 tag of a name follows its address.** The family filter
+  went by the tags in the configuration, which a name could not have right:
+  it moves between the families with the network. A target given by name now
+  shows (dashed) and filters by the family of the address it resolves to
+  now; an ipv4/ipv6 tag stored on it is ignored and its tag editor does not
+  offer them. A literal address keeps its own tags, as before.
 
 ## 0.3.0 (2026-11-14)
 

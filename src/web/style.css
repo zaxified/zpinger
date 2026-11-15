@@ -163,6 +163,8 @@ button.pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   background: var(--bg); border: 1px solid var(--line); color: var(--muted);
 }
 .rtag.on { border-color: var(--accent); color: var(--accent); }
+/* A name's ipv4/ipv6 tag, from the address it resolves to now. */
+.rtag.auto { border-style: dashed; }
 
 /* Edit buttons: shown on hover or focus where there is a mouse, always
    (faintly) on touch screens. */
