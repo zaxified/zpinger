@@ -1286,6 +1286,8 @@ pub fn resolve(io: Io, gpa: std.mem.Allocator, host: []const u8) !icmp.Addr {
 const DnsPolicy = struct { now: i64, stale_s: i64 };
 
 /// Sets `addr` (or `err`) of every job, `max_lookups` lookups at a time.
+// zig-libs request: dns — no caching resolver (TTL clamp, serve-stale RFC 8767,
+// failure backoff, entry bound): kept per target here and in trace.zig NameCache.
 fn resolveAll(io: Io, gpa: std.mem.Allocator, jobs: []Job, policy: DnsPolicy) void {
     var next: std.atomic.Value(usize) = .init(0);
     var group: Io.Group = .init;

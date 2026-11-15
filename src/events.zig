@@ -100,6 +100,7 @@ var queue_on: std.atomic.Value(bool) = .init(false);
 /// Guarded by the stderr lock (`flushQueue`).
 var out_buf: [queue_size]u8 = undefined;
 
+// zig-libs request: accesslog — Sink has no non-blocking drop-counted mode.
 fn enqueue(line: []const u8) bool {
     {
         while (!queue_lock.tryLock()) std.atomic.spinLoopHint();
@@ -320,6 +321,7 @@ pub fn deinit() void {
 /// Whether stderr is the journal: `JOURNAL_STREAM` (`device:inode`, set by
 /// systemd) names the file stderr is (systemd.exec(5)); a variable merely
 /// inherited by a shell on a terminal does not.
+// zig-libs request: syslog — no detection of stderr connected to journald.
 pub fn stderrIsJournal(journal_stream: ?[]const u8) bool {
     const value = journal_stream orelse return false;
     const colon = std.mem.findScalar(u8, value, ':') orelse return false;

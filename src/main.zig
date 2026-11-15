@@ -246,6 +246,10 @@ const max_body_bytes = 4096;
 /// slowloris holding a thread, a slow reader) is reported by `onError`
 /// with what was counted here, one that closed without a single request (a
 /// port scan, a TLS client on the plain-HTTP port) here.
+// zig-libs request: abuseguard — no per-IP-cap exemption for a trusted proxy
+// (Options.allow lifts reputation only), so the global cap is counted here;
+// http — `.closed` carries no per-connection summary and `timed_out` fires
+// after it, hence the live map and `last_closed` below.
 const Admission = struct {
     io: Io,
     gpa: std.mem.Allocator,
@@ -449,6 +453,7 @@ fn netwatchLoop(monitor: *Monitor) void {
 
 /// Blocks SIGTERM and SIGINT in this (still the only) thread and returns a
 /// signalfd for them; null if the kernel refuses (then they act as before).
+// zig-libs request: (new) — no stop-signal helper (signalfd SIGTERM/SIGINT wait).
 fn blockStopSignals() ?linux.fd_t {
     var set = linux.sigemptyset();
     linux.sigaddset(&set, .TERM);

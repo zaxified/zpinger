@@ -601,6 +601,7 @@ const Name = struct {
 /// lookup is retried after `monitor.backoffS` of the failures in a row,
 /// and an entry past its time is freed by `prune`. Bounded: with
 /// `max_cached_names` entries, a new one is not kept.
+// zig-libs request: dns — no caching resolver; see monitor.zig resolveAll.
 const NameCache = struct {
     mutex: Io.Mutex = .init,
     map: std.AutoHashMapUnmanaged(Key, Entry) = .empty,
