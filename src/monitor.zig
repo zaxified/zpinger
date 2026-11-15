@@ -1281,17 +1281,30 @@ pub fn resolve(io: Io, gpa: std.mem.Allocator, host: []const u8) !icmp.Addr {
     if (icmp.Addr.parse(host)) |addr| return addr else |_| {}
     var resolver = dns.Resolver.init(io, gpa, .{ .timeout_ms = lookup_timeout_ms });
     defer resolver.deinit();
-    const found = try resolver.lookupIpTtl(host);
-    defer gpa.free(found.ips);
-    if (found.ips.len == 0) return error.UnknownHostName;
-    return icmp.Addr.fromIp(found.ips[0]);
+    var found = try resolver.lookupIp(host);
+    defer found.deinit();
+    if (found.items.len == 0) return error.UnknownHostName;
+    return icmp.Addr.fromIp(found.items[0]);
 }
+
+/// What a lookup of a name found: the addresses in RFC 6724 order, the
+/// answer's TTL (null: none), and whether one family's query failed.
+const IpAnswer = struct { ips: []const netaddr.Ip, ttl_s: ?u32 = null, partial: bool = false };
 
 const DnsPolicy = struct { now: i64, stale_s: i64 };
 
 /// Sets `addr` (or `err`) of every job, `max_lookups` lookups at a time.
-// zig-libs request: dns — no caching resolver (TTL clamp, serve-stale RFC 8767,
-// failure backoff, entry bound): kept per target here and in trace.zig NameCache.
+// zig-libs request: dns — CachingResolver exists, but zpinger cannot move onto it:
+// (1) no per-key refresh or invalidate: after a network change the names whose kept
+// address lost its route must be looked up again at once and the rest spread over
+// 10 minutes (`planLookups`), `clear()` would drop every entry at once;
+// (2) a cache hit keeps the old RFC 6724 order, so an answer's addresses cannot be
+// re-ordered by route (`hasRoute`) without the lookup;
+// (3) a stale answer (`source = .stale`) carries no error, but the page and the
+// `action=stale error=` event name why the lookup failed;
+// (4) the serve-stale window runs from expiry, zpinger's `--dns-stale` from the last
+// good answer; the failure backoff also covers an empty answer (NXDOMAIN) and an
+// address with no route, which doubles 1 min .. 1 h per failure in a row.
 fn resolveAll(io: Io, gpa: std.mem.Allocator, jobs: []Job, policy: DnsPolicy) void {
     var next: std.atomic.Value(usize) = .init(0);
     var group: Io.Group = .init;
@@ -1331,13 +1344,13 @@ fn resolveJobs(io: Io, gpa: std.mem.Allocator, jobs: []Job, next: *std.atomic.Va
             continue;
         }
         if (resolver == null) resolver = dns.Resolver.init(io, gpa, .{ .timeout_ms = lookup_timeout_ms });
-        const found = resolver.?.lookupIpTtl(job.host) catch |err| {
+        var lookup = resolver.?.lookupIp(job.host) catch |err| {
             if (err == error.Canceled) return;
             settleFailure(job, err, policy);
             continue;
         };
-        defer gpa.free(found.ips);
-        settleAnswer(job, found, policy);
+        defer lookup.deinit();
+        settleAnswer(job, .{ .ips = lookup.items, .ttl_s = lookup.ttl_s, .partial = lookup.partial }, policy);
     }
 }
 
@@ -1359,9 +1372,9 @@ fn settleFailure(job: *Job, err: anyerror, policy: DnsPolicy) void {
 /// is authoritative: no stale address is kept for it. Otherwise the cached
 /// address stays while it is still in the answer, so a name with several
 /// addresses is not probed at a different one every time it expires.
-fn settleAnswer(job: *Job, found: dns.Resolver.IpLookup, policy: DnsPolicy) void {
+fn settleAnswer(job: *Job, found: IpAnswer, policy: DnsPolicy) void {
     job.looked_up = true;
-    const ttl: i64 = found.ttl_s orelse default_ttl_s;
+    const ttl: i64 = if (found.ttl_s) |v| v else default_ttl_s;
     job.expires = policy.now + std.math.clamp(ttl, min_ttl_s, max_ttl_s);
     if (found.ips.len == 0) {
         job.expires = @max(job.expires, policy.now + backoffS(job.fails));
