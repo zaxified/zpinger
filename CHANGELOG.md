@@ -6,6 +6,10 @@ and these entries come from zig-fping's CHANGELOG.md.
 
 ## Unreleased
 
+- **Hop names are kept for their PTR record's own TTL** (within 1 minute and
+  1 hour, as before), not for a fixed 5 minutes; the lookup and its cache are
+  zig-libs `dns.CachingResolver`. A hop name's first lookup per hop is
+  unchanged.
 - **A name follows a network change.** A target given by name kept its
   address as long as DNS still listed it, so after a switch to a network
   without IPv6 its AAAA address stayed DOWN for good although the name had
