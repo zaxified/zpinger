@@ -181,7 +181,7 @@ pub fn main(init: std.process.Init) !void {
         .max_conns_per_ip = max_connections_per_ip,
         .per_ip_cap_exempt = &loopback_prefixes,
     }) catch unreachable;
-    var admission: Admission = .{ .io = io, .gpa = gpa, .guard = guard };
+    var admission: Admission = .{ .guard = guard };
     defer admission.deinit();
     var server = http.Server.init(io, gpa, .{
         .handler = handle,
@@ -190,6 +190,7 @@ pub fn main(init: std.process.Init) !void {
         .on_connect_ctx = &admission,
         .on_conn_state = Admission.onConnState,
         .on_conn_state_ctx = &admission,
+        .on_conn_closed = Admission.onConnClosed,
         .on_error = onError,
         .addr = addr_text,
         .port = address.getPort(),
@@ -256,34 +257,16 @@ const loopback_prefixes = [_]netaddr.Prefix{
 /// Admission at accept time: the global and the per-client cap, in an
 /// `abuseguard.Guard` (loopback exempt from the per-client one).
 ///
-/// It also follows every connection to its end: one a timeout cut off (a
-/// slowloris holding a thread, a slow reader) is reported by `onError`
-/// with what was counted here, one that closed without a single request (a
-/// port scan, a TLS client on the plain-HTTP port) here.
-// zig-libs request: http — `.closed` carries no per-connection summary and
-// `timed_out` fires after it, hence the live map and `last_closed` below.
+/// It also follows every connection to its end (the server's connection
+/// summary): one a timeout cut off (a slowloris holding a thread, a slow
+/// reader) is reported with what the summary counted, one that closed
+/// without a single request (a port scan, a TLS client on the plain-HTTP
+/// port) likewise.
 const Admission = struct {
-    io: Io,
-    gpa: std.mem.Allocator,
     guard: abuseguard.Guard,
-    mutex: Io.Mutex = .init,
-    /// Open connections by peer address and port: when it started, and
-    /// how many requests it sent.
-    live: std.AutoHashMapUnmanaged(ConnKey, Conn) = .empty,
-
-    const ConnKey = [18]u8;
-    const Conn = struct { started_ns: i96, requests: u32 = 0 };
 
     fn deinit(a: *Admission) void {
-        a.live.deinit(a.gpa);
         a.guard.deinit();
-    }
-
-    fn keyOf(peer: Io.net.IpAddress) ConnKey {
-        var k: ConnKey = undefined;
-        k[0..16].* = ipOf(peer).as16();
-        std.mem.writeInt(u16, k[16..18], peer.getPort(), .big);
-        return k;
     }
 
     fn onConnect(ctx: ?*anyopaque, peer: Io.net.IpAddress) http.Server.ConnDecision {
@@ -299,56 +282,35 @@ const Admission = struct {
         }
     }
 
-    /// Every admitted connection reports `.new` and, at its end, `.closed`
-    /// exactly once; `.active` once per request.
+    /// Every admitted connection reports `.closed` exactly once.
     fn onConnState(ctx: ?*anyopaque, peer_or_null: ?Io.net.IpAddress, state: http.Server.ConnState) void {
         const a: *Admission = @ptrCast(@alignCast(ctx.?));
         const peer = peer_or_null orelse return;
-        const now = Io.Clock.awake.now(a.io).nanoseconds;
-        switch (state) {
-            .new => {
-                a.mutex.lockUncancelable(a.io);
-                defer a.mutex.unlock(a.io);
-                a.live.put(a.gpa, keyOf(peer), .{ .started_ns = now }) catch {}; // untracked: not reported
-            },
-            .active => {
-                a.mutex.lockUncancelable(a.io);
-                defer a.mutex.unlock(a.io);
-                if (a.live.getPtr(keyOf(peer))) |c| c.requests += 1;
-            },
-            .idle => {},
-            .closed => {
-                const ip = ipOf(peer);
-                a.guard.connClosed(ip);
-                const conn = blk: {
-                    a.mutex.lockUncancelable(a.io);
-                    defer a.mutex.unlock(a.io);
-                    break :blk (a.live.fetchRemove(keyOf(peer)) orelse return).value;
-                };
-                const ms: i64 = @intCast(@divTrunc(now - conn.started_ns, std.time.ns_per_ms));
-                // The server reports a timeout after `.closed`, on this
-                // thread: `onError` takes the counts from here.
-                last_closed = .{ .key = keyOf(peer), .requests = conn.requests, .ms = ms };
-                // Near the read timeout it was the timeout (reported then),
-                // else the client closed it.
-                if (conn.requests == 0 and ms < read_timeout_ms - 500)
-                    _ = events.emit(.info, .conn, .conn, .of(ip), "action=closed reason=no_request requests=0 ms={d}", .{ms});
-            },
-        }
+        if (state == .closed) a.guard.connClosed(ipOf(peer));
     }
 
-    /// The connection this thread closed last, for `onError`'s timeout line.
-    threadlocal var last_closed: ?struct { key: ConnKey, requests: u32, ms: i64 } = null;
+    /// The phase a deadline cut this thread's last connection off in, set by
+    /// `onError` (which hears the timeout just before the summary).
+    threadlocal var timeout_err: ?anyerror = null;
 
-    /// A connection a deadline cut off: `err` names the phase. Waiting
-    /// for the next request on a kept-alive connection is what browsers
-    /// do, not an attack: only a debug line.
-    fn timedOut(peer: Io.net.IpAddress, err: anyerror) void {
+    /// One finished connection. A deadline that cut it off: the summary
+    /// names the phase (`timeout_err`). Waiting for the next request on a
+    /// kept-alive connection is what browsers do, not an attack: only a
+    /// debug line.
+    fn onConnClosed(_: ?*anyopaque, sum: http.Server.ConnSummary) void {
+        const err = timeout_err;
+        timeout_err = null;
+        const peer = sum.peer orelse return;
         const ip = ipOf(peer);
-        const c = last_closed orelse return;
-        last_closed = null;
-        if (!std.mem.eql(u8, &c.key, &keyOf(peer))) return;
-        const phase: []const u8 = switch (err) {
+        const ms: i64 = @intCast(@divTrunc(sum.duration_ns, std.time.ns_per_ms));
+        if (sum.end != .timed_out) {
+            // Near the read timeout it was the timeout (reported below),
+            // else the client closed it.
+            if (sum.requests == 0 and ms < read_timeout_ms - 500)
+                _ = events.emit(.info, .conn, .conn, .of(ip), "action=closed reason=no_request requests=0 ms={d}", .{ms});
+            return;
+        }
+        const phase: []const u8 = switch (err orelse error.Unknown) {
             error.NoRequestTimeout => "no_request",
             error.IdleTimeout => "idle",
             error.HeadTimeout => "head",
@@ -357,10 +319,10 @@ const Admission = struct {
             error.ResponseTimeout => "response",
             else => "read",
         };
-        if (err == error.IdleTimeout) {
-            _ = events.emit(.debug, .conn, .conn, .of(ip), "action=closed reason=idle requests={d} ms={d} phase={s}", .{ c.requests, c.ms, phase });
+        if (err != null and err.? == error.IdleTimeout) {
+            _ = events.emit(.debug, .conn, .conn, .of(ip), "action=closed reason=idle requests={d} ms={d} phase={s}", .{ sum.requests, ms, phase });
         } else {
-            _ = events.emit(.warn, .conn, .conn, .of(ip), "action=closed reason=timeout requests={d} ms={d} phase={s}", .{ c.requests, c.ms, phase });
+            _ = events.emit(.warn, .conn, .conn, .of(ip), "action=closed reason=timeout requests={d} ms={d} phase={s}", .{ sum.requests, ms, phase });
         }
     }
 };
@@ -395,7 +357,7 @@ fn onError(_: ?*anyopaque, kind: http.Server.ErrorKind, err: ?anyerror, status: 
             });
         },
         .accept_failed => log.warn("accept: {t}", .{err orelse error.Unknown}),
-        .timed_out => if (peer) |p| Admission.timedOut(p, err orelse error.Unknown),
+        .timed_out => Admission.timeout_err = err orelse error.Unknown,
     }
 }
 
