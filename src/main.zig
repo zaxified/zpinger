@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const Io = std.Io;
-const linux = std.os.linux;
+const stopsignal = @import("stopsignal");
 const http = @import("http");
 const abuseguard = @import("abuseguard");
 const Status = std.http.Status;
@@ -64,8 +64,10 @@ const usage =
 
 pub fn main(init: std.process.Init) !void {
     // Before any thread starts, so every thread inherits the mask: SIGTERM
-    // and SIGINT then reach only `stopOnSignal`'s signalfd.
-    const stop_fd = blockStopSignals();
+    // and SIGINT then reach only `stopOnSignal`'s signalfd. Null if the kernel
+    // refuses (then they act as before).
+    var stop_signals: ?stopsignal.StopSignals = stopsignal.StopSignals.init(.{}) catch null;
+    defer if (stop_signals) |*st| st.deinit();
     const io = init.io;
     const gpa = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -224,7 +226,7 @@ pub fn main(init: std.process.Init) !void {
     try tasks.concurrent(io, netwatchLoop, .{&monitor});
     try tasks.concurrent(io, pruneTraceNames, .{ io, &tracer_state });
     try tasks.concurrent(io, events.flushLoop, .{io});
-    if (stop_fd) |fd| try tasks.concurrent(io, stopOnSignal, .{ &monitor, fd });
+    if (stop_signals) |*st| try tasks.concurrent(io, stopOnSignal, .{ &monitor, st });
     server.serve() catch |err| fatal(io, "serving failed: {t}", .{err});
 }
 
@@ -449,38 +451,14 @@ fn netwatchLoop(monitor: *Monitor) void {
 // `systemctl stop`, a package upgrade's restart and Ctrl-C send SIGTERM or
 // SIGINT. Left to the default action they end the process at once, losing
 // the history since its last write (up to 15 cycles for a big one). They are
-// blocked instead and read from a signalfd: the history is written, then
-// the process exits 0.
-
-/// Blocks SIGTERM and SIGINT in this (still the only) thread and returns a
-/// signalfd for them; null if the kernel refuses (then they act as before).
-// zig-libs request: (new) — no stop-signal helper (signalfd SIGTERM/SIGINT wait).
-fn blockStopSignals() ?linux.fd_t {
-    var set = linux.sigemptyset();
-    linux.sigaddset(&set, .TERM);
-    linux.sigaddset(&set, .INT);
-    const fd = linux.signalfd(-1, &set, linux.SFD.CLOEXEC);
-    if (linux.errno(fd) != .SUCCESS) return null;
-    if (linux.errno(linux.sigprocmask(linux.SIG.BLOCK, &set, null)) != .SUCCESS) {
-        _ = linux.close(@intCast(fd));
-        return null;
-    }
-    return @intCast(fd);
-}
+// blocked instead and read from a signalfd (zig-libs stopsignal): the history
+// is written, then the process exits 0.
 
 /// Waits for SIGTERM or SIGINT, writes the history and exits.
-fn stopOnSignal(monitor: *Monitor, fd: linux.fd_t) void {
-    var info: linux.signalfd_siginfo = undefined;
-    while (true) {
-        const n = linux.read(fd, @ptrCast(&info), @sizeOf(linux.signalfd_siginfo));
-        switch (linux.errno(n)) {
-            .SUCCESS => if (n == @sizeOf(linux.signalfd_siginfo)) break,
-            .INTR => {},
-            else => return, // not seen in practice; systemd's SIGKILL after its stop timeout still ends it
-        }
-    }
+fn stopOnSignal(monitor: *Monitor, stop: *const stopsignal.StopSignals) void {
+    const which = stop.wait(monitor.io) catch return; // canceled at shutdown; systemd's SIGKILL after its stop timeout still ends it
     monitor.saveNow();
-    _ = events.emit(.info, .stop, .system, null, "signal={s}", .{if (info.signo == @backingInt(linux.SIG.INT)) "INT" else "TERM"});
+    _ = events.emit(.info, .stop, .system, null, "signal={s}", .{if (which == .int) "INT" else "TERM"});
     events.stopQueue();
     std.process.exit(0);
 }

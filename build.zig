@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "netaddr", .module = zig_libs.module("netaddr") },
             .{ .name = "netlink", .module = zig_libs.module("netlink") },
             .{ .name = "ratelimit", .module = zig_libs.module("ratelimit") },
+            .{ .name = "stopsignal", .module = zig_libs.module("stopsignal") },
             .{ .name = "security-headers", .module = zig_libs.module("security-headers") },
             .{ .name = "traceroute", .module = zig_libs.module("traceroute") },
             .{ .name = "build_options", .module = options.createModule() },
