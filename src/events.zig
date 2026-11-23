@@ -70,8 +70,11 @@ fn put(
         w.end = buf.len;
     };
     const line = w.buffered();
-    _ = sink_users.fetchAdd(1, .acquire);
-    if (queue_on.load(.acquire)) {
+    // seq_cst on both sides (here and in `stopQueue`): each side stores, then
+    // loads what the other stores. With acquire/release alone both loads may
+    // see the old value, and a line would go into a sink being freed.
+    _ = sink_users.fetchAdd(1, .seq_cst);
+    if (queue_on.load(.seq_cst)) {
         const queued = sink.log(line);
         _ = sink_users.fetchSub(1, .release);
         if (queued) return true;
@@ -114,8 +117,8 @@ fn startQueue(gpa: std.mem.Allocator, io: Io, w: *Io.Writer) void {
 /// Writes out what is queued; from now on lines go straight to stderr.
 /// Callable from any thread (before an exit), and twice.
 pub fn stopQueue() void {
-    if (!queue_on.swap(false, .acq_rel)) return;
-    while (sink_users.load(.acquire) != 0) std.atomic.spinLoopHint();
+    if (!queue_on.swap(false, .seq_cst)) return;
+    while (sink_users.load(.seq_cst) != 0) std.atomic.spinLoopHint();
     sink.deinit(); // drains
 }
 

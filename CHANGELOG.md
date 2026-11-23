@@ -4,7 +4,7 @@ This application started in the zig-fping repository as
 `example-apps/fping-watch`; its history was carried over (`git filter-repo`),
 and these entries come from zig-fping's CHANGELOG.md.
 
-## Unreleased
+## 0.4.0 (2026-11-23)
 
 - **Names are cached by zig-libs `dns.CachingResolver`.** TTL bounds
   (1 minute to 1 hour), serve-stale, the failure backoff and the entry bound
@@ -43,20 +43,26 @@ and these entries come from zig-fping's CHANGELOG.md.
   global address or a default route coming or going makes the next cycle
   look every name up again, so a name moves to the family the host can reach
   within one cycle, and back to IPv6 as soon as it returns instead of after
-  its TTL. The systemd unit allows `AF_NETLINK` for it (exposure still 1.3).
+  its TTL. A notification for what the host already has (an IPv6 router
+  advertisement refreshing an address's lifetimes, a new temporary address
+  in a prefix already there) is not a change. The systemd unit allows
+  `AF_NETLINK` for it (exposure still 1.3).
 
 - **DNS is asked sparingly.** At most `--dns-rate` names a second (default
   20) are looked up, names whose address lost its route first; after a
   network change only those are looked up at once, the others at random
   within 10 minutes, so 10 000 names or a flapping IPv6 link do not burst
-  the local resolver. A lookup that keeps failing backs off exponentially
+  the local resolver. In a list longer than the budget the lookups start at
+  a different target each cycle, so no name is always left out. A lookup that keeps failing backs off exponentially
   (1 to 60 minutes) instead of repeating every minute.
 
 - **A trace shares hop names and follows its target's address.** Reverse-DNS
   names are cached for every trace (5 minutes, failures backing off 1 to 60
   minutes, freed once expired, at most 4096), instead of each trace asking
-  again. A trace goes where the probing goes: after a move to the other
-  family it starts over at the new address.
+  again. A trace goes where the probing goes: when the probing moves the
+  name to another address (after a network change, usually the other
+  family) it starts over there. A trace refused because the server-wide
+  start limit is spent no longer costs the viewer one of their own starts.
 
 - **Less code of our own: zig-libs modules where they exist.** Log
   timestamps come from `datefmt`, the response headers from
@@ -67,6 +73,17 @@ and these entries come from zig-fping's CHANGELOG.md.
   other suffix no longer does), the trace start limits from `ratelimit`
   token buckets (10 a minute in all, 4 per viewer, refilled evenly instead of
   an exact 60-second window), and the IPv6 /64 client key from `netaddr`.
+  `If-None-Match: *` on `/api/state` now gets 304 (RFC 9110; it used to
+  get the whole state).
+- **Security log: a timeout while the response is written is `phase=write`.**
+  The connection's timeouts come from zig-libs `http`, which knows the
+  phases `no_request head body write`; `phase=response` (a response that
+  took too long to send) is now `phase=write`, and the `read` fallback is
+  gone. A parser keyed on `phase=response` needs updating
+  (doc/security-log.md).
+- **A name's tag picker drops a stored ipv4/ipv6 tag** when it saves:
+  those tags of a name are not used any more (its family tag follows its
+  address), so editing a name's tags cleans them out.
 
 ## 0.3.0 (2026-11-14)
 

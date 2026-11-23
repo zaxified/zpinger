@@ -168,6 +168,10 @@ pub const Tracer = struct {
     /// Frees the hop names whose time ran out (`main` calls it once a
     /// minute, whether a trace runs or not).
     pub fn pruneNames(t: *Tracer) void {
+        // Under the mutex: the first trace may be making the cache right now
+        // (`nameCache`). The cache has its own lock for what prune does.
+        t.names_mutex.lockUncancelable(t.io);
+        defer t.names_mutex.unlock(t.io);
         if (t.names_cache) |*c| c.prune();
     }
 
@@ -275,11 +279,14 @@ pub const Tracer = struct {
     /// Whether a new session may start now: at most `max_starts_per_min`
     /// a minute in total and `max_viewer_starts_per_min` per viewer (token
     /// buckets: the whole count at once, then refilled evenly over the
-    /// minute). The viewer's limit is asked first, so a viewer held back
-    /// takes nothing from everybody else. Under `mutex`.
+    /// minute). The total is looked at first without taking from it, so a
+    /// refusal for everybody costs the viewer nothing; then the viewer's
+    /// limit is asked, so a viewer held back takes nothing from everybody
+    /// else. Under `mutex`.
     fn allowStart(t: *Tracer, viewer: Viewer, now_ns: u64) bool {
         if (t.viewer_starts == null) t.viewer_starts = .init(t.gpa, viewer_starts_options);
         if (t.starts == null) t.starts = .full(starts_config, now_ns);
+        if (t.starts.?.tokensAt(starts_config, now_ns) < 1) return false;
         if (!t.viewer_starts.?.allowAt(&viewer, now_ns).allowed) return false;
         return t.starts.?.allowAt(starts_config, now_ns).allowed;
     }

@@ -47,7 +47,7 @@ does not enable them yet.
 On Debian or Ubuntu (amd64 or arm64), the latest release:
 
 ```sh
-v=0.3.0 arch=$(dpkg --print-architecture)
+v=0.4.0 arch=$(dpkg --print-architecture)
 url=https://github.com/zaxified/zpinger/releases/download/v$v
 curl -fL -O "$url/zpinger_${v}_$arch.deb" -O "$url/SHA256SUMS"
 sha256sum -c --ignore-missing SHA256SUMS

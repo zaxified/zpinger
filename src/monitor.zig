@@ -510,6 +510,9 @@ pub const Monitor = struct {
 
         // 1. Snapshot the active targets, so probing runs without the lock.
         //    After a network change every name is looked up again.
+        // The names of removed or renamed targets leave the cache once their
+        // time (and the `--dns-stale` window) has run out.
+        m.dnsCache().prune();
         const net_changed = m.net_changed.swap(false, .acq_rel);
         if (net_changed) {
             log.info("the network changed: names without a route are looked up again, the others spread", .{});
@@ -651,7 +654,7 @@ pub const Monitor = struct {
             // family that has a route. A fresh answer that still has no
             // route counts as a failed lookup: the next waits longer.
             if (icmp.Addr.parse(job.host)) |_| {} else |_| {
-                if (job.looked_up) target.dns_fails +|= 1;
+                if (job.fresh) target.dns_fails +|= 1;
                 const again = t + backoffS(target.dns_fails);
                 target.refresh_at = if (target.refresh_at == 0) again else @min(target.refresh_at, again);
             }
@@ -1307,8 +1310,15 @@ fn planLookups(io: Io, jobs: []Job, plan: LookupPlan, routed: *const fn (netaddr
             job.refresh_at = plan.now + std.mem.readInt(u32, &r, .little) % net_spread_s;
         }
     };
+    // Within a rank the budget starts at a random target each cycle: in a
+    // list longer than the budget, the same front names would otherwise win
+    // every cycle and the tail never be looked up.
+    var r: [4]u8 = undefined;
+    io.random(&r);
+    const start = if (jobs.len == 0) 0 else std.mem.readInt(u32, &r, .little) % jobs.len;
     var used: u64 = 0;
-    for (0..3) |pass| for (jobs) |*job| {
+    for (0..3) |pass| for (0..jobs.len) |n| {
+        const job = &jobs[(start + n) % jobs.len];
         if (!job.due) continue;
         if (icmp.Addr.parse(job.host)) |_| continue else |_| {}
         const rank: usize = if (job.urgent) 0 else if (job.cached == null) 1 else 2;
@@ -1392,6 +1402,7 @@ fn resolveJobs(jobs: []Job, next: *std.atomic.Value(usize), policy: DnsPolicy) v
             continue;
         };
         defer answer.deinit();
+        job.fresh = answer.source == .network;
         settleAnswer(job, .{
             .ips = answer.lookup.items,
             .ttl_s = answer.lookup.ttl_s,
@@ -1491,6 +1502,8 @@ const Job = struct {
     /// Set by a lookup (`looked_up`): when to look again, why it failed,
     /// and whether it left no address at all (`dns_failed`).
     looked_up: bool = false,
+    /// The answer came from DNS now, not from the cache's table.
+    fresh: bool = false,
     expires: i64 = 0,
     dns_error: ?[]const u8 = null,
     dns_failed: bool = false,
@@ -2175,6 +2188,26 @@ test "lookup plan: the budget, names without a route first, the rest spread afte
     var next: std.atomic.Value(usize) = .init(0);
     resolveJobs((&deferred)[0..1], &next, .{ .now = 1000, .stale_s = 3600 });
     try testing.expectEqualStrings("waiting for its DNS lookup", deferred.err.?);
+
+    // More expired names than the budget: no name is always the one left
+    // out (the budget starts at a random name each cycle).
+    var looked: [4]u32 = @splat(0);
+    for (0..200) |_| {
+        var many = [_]Job{
+            .{ .id = 1, .host = "a.example", .cached = ip("192.0.2.1"), .due = true },
+            .{ .id = 2, .host = "b.example", .cached = ip("192.0.2.2"), .due = true },
+            .{ .id = 3, .host = "c.example", .cached = ip("192.0.2.3"), .due = true },
+            .{ .id = 4, .host = "d.example", .cached = ip("192.0.2.4"), .due = true },
+        };
+        planLookups(testing.io, &many, .{ .now = 1000, .budget = 1, .net_changed = false }, routed);
+        var due: u32 = 0;
+        for (many, 0..) |j, i| if (j.due) {
+            due += 1;
+            looked[i] += 1;
+        };
+        try testing.expectEqual(1, due);
+    }
+    for (looked) |n| try testing.expect(n > 0);
 }
 
 test "backoff for an address with no route: 1, 2, 4 ... 60 minutes; a failed lookup waits a minute" {
@@ -2237,6 +2270,21 @@ test "no route to the address: the error says so and a name looks again within a
     m.mutex.unlock(m.io);
     try testing.expect(t.last_error == null);
     try testing.expectEqual(0, t.refresh_at);
+
+    // Only an answer DNS gave just now counts as a failed lookup; one from
+    // the cache's table (looked up, not fresh) leaves the backoff alone.
+    t.refresh_at = 0;
+    t.dns_fails = 0;
+    job = .{ .id = id, .host = t.host, .sent = probes_per_cycle, .no_route = true, .looked_up = true };
+    m.mutex.lockUncancelable(m.io);
+    m.recordLocked(t, 180, &job);
+    m.mutex.unlock(m.io);
+    try testing.expectEqual(0, t.dns_fails);
+    job = .{ .id = id, .host = t.host, .sent = probes_per_cycle, .no_route = true, .looked_up = true, .fresh = true };
+    m.mutex.lockUncancelable(m.io);
+    m.recordLocked(t, 240, &job);
+    m.mutex.unlock(m.io);
+    try testing.expectEqual(1, t.dns_fails);
 }
 
 test "DNS cache: the target keeps the address, its state follows the lookups, a new host resets it" {

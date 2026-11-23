@@ -50,8 +50,9 @@ again after 1, 2, 4 … 60 minutes, and a name past its time is freed within a
 minute, traces running or not (at most 4096 kept).
 
 The trace goes to the address the probing uses for the target and follows it:
-when the probing moves a name to the other family (the host lost its IPv6
-route, or got it back), the trace starts over at the new address. While the
+when the probing moves a name to another address (usually the other family:
+the host lost its IPv6 route, or got it back), the trace starts over at the
+new address. While the
 destination does not answer, the table ends one hop after the last that did,
 shown as "no answer", as mtr shows `???`.
 
@@ -119,7 +120,8 @@ Not there yet; know them before you expose it:
 - **A name follows the host's network.** zpinger listens to the kernel's
   address and route notifications (what `ip monitor` reads, no privilege
   needed). When a global address or a default route comes or goes (a Wi-Fi
-  switch, IPv6 lost or back, a VPN), the next cycle checks, without DNS,
+  switch, IPv6 lost or back, a VPN; not a router advertisement refreshing
+  an address the host already has), the next cycle checks, without DNS,
   which names' addresses have no route any more and looks those up at once
   (a lookup puts addresses the host has no route to last, so the name moves
   to the family that has one). The other names are looked up again at a
@@ -129,7 +131,8 @@ Not there yet; know them before you expose it:
   host" on the page) makes its name look again within a minute.
 - **DNS is asked sparingly.** At most `--dns-rate` names a second (20,
   1200 a minute) are looked up, names without a route first; the others
-  keep their address until the next cycle, so a big list or a flapping link
+  keep their address until the next cycle (which starts at another target),
+  so a big list or a flapping link
   never sends the local resolver a burst. A lookup that keeps failing (no
   answer, no such name, no route to what it found) waits longer each time:
   1, 2, 4 … 60 minutes, back to normal after an answer that works or a
