@@ -6,7 +6,7 @@
 # .json) and a writable one whose list is exactly
 #   {"targets":[{"name":"x","host":"192.0.2.1","tags":["old"]}]}
 #   ui.py DEMO_URL RW_URL SHOTDIR      `ok`/`FAIL` lines, exit 1 on any FAIL
-import asyncio, base64, json, os, statistics, subprocess, sys, tempfile, time, unicodedata, urllib.request
+import asyncio, base64, json, os, re, statistics, subprocess, sys, tempfile, time, unicodedata, urllib.request
 import websockets
 
 DEMO, RW, SHOTS = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -71,17 +71,31 @@ async def main():
             # in the name, host or a tag), not taken from the page.
             demo_targets = (await js("state"))["targets"]
             N = len(demo_targets)
+            # The tags the page goes by (app.js tagsOf): a name's ipv4/ipv6 tag
+            # is the family of the address it resolves to now, not a stored one.
+            def family_tag(host):
+                if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", host):
+                    return "ipv4"
+                if ":" in host and re.fullmatch(r"[0-9a-fA-F:.]+(%\S+)?", host):
+                    return "ipv6"
+                return None
+            def tags_of(t):
+                if family_tag(t["host"]) is not None:
+                    return t["tags"]
+                own = [g for g in t["tags"] if g not in ("ipv4", "ipv6")]
+                auto = family_tag(t["address"]) if t.get("address") else None
+                return own + [auto] if auto else own
             def expect(tags=(), q=""):
                 out = []
                 for t in demo_targets:
-                    hay = [x.lower() for x in [t["name"], t["host"], *t["tags"]]]
-                    if all(g in t["tags"] for g in tags) and all(any(w in h for h in hay) for w in q.lower().split()):
+                    hay = [x.lower() for x in [t["name"], t["host"], *tags_of(t)]]
+                    if all(g in tags_of(t) for g in tags) and all(any(w in h for h in hay) for w in q.lower().split()):
                         out.append(t["name"])
                 return sorted(out)
             all_names = await js(names)
             check(N >= 8 and len(all_names) == N, f"all {N} targets shown: {len(all_names)}")
             chips = await js("[...document.querySelectorAll('#tagbar .chip')].map(e => e.textContent)")
-            check(chips == sorted({g for t in demo_targets for g in t["tags"]}), f"chips {chips}")
+            check(chips == sorted({g for t in demo_targets for g in tags_of(t)}), f"chips {chips}")
             await js("[...document.querySelectorAll('#tagbar .chip')].find(c => c.textContent === 'dns').click()")
             await js("[...document.querySelectorAll('#tagbar .chip')].find(c => c.textContent === 'ipv6').click()")
             got = await js(names)
