@@ -1,6 +1,6 @@
 .{
     .name = .zpinger,
-    .version = "0.3.0",
+    .version = "0.4.0",
     .minimum_zig_version = "0.17.1",
     .fingerprint = 0x7a949a81c7030d18,
     .paths = .{ "build.zig", "build.zig.zon", "src", "tools", "deploy", "scripts", "README.md", "LICENSE", "doc" },
